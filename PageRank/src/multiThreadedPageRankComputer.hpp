@@ -21,7 +21,7 @@ public:
     std::vector<PageIdAndRank> computeForNetwork(Network const& /*network*/, double /*alpha*/, uint32_t /*iterations*/, double /*tolerance*/) const
     {
         std::vector<PageIdAndRank> result;
-    	return result;
+        return result;
     }
 
     std::string getName() const

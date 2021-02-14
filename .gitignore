@@ -1,2 +1,15 @@
 .idea/
 cmake-build-debug/
+
+PageRank/CMakeFiles/
+PageRank/Makefile
+PageRank/cmake-build-debug/
+PageRank/cmake_install.cmake
+PageRank/tests/CMakeFiles/
+PageRank/tests/Makefile
+PageRank/tests/cmake_install.cmake
+PageRank/tests/e2eTest
+PageRank/tests/pageRankCalculationTest
+PageRank/tests/pageRankPerformanceTest
+PageRank/tests/sha256Test
+PageRank/CMakeCache.txt

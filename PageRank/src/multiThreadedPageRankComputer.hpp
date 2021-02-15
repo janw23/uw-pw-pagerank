@@ -128,16 +128,15 @@ public:
                 difference += std::abs(rankDifference);
             }
 
-            // todo Why is this updated in every iteration?
-            std::vector<PageIdAndRank> result;
-            for (auto iter : pageHashMap) {
-                result.push_back(PageIdAndRank(iter.first, iter.second.getCurrentRank(iteration)));
-            }
-
-            ASSERT(result.size() == network.getSize(),
-                   "Invalid result size=" << result.size() << ", for network" << network);
-
             if (difference < tolerance) {
+                std::vector<PageIdAndRank> result;
+                for (auto iter : pageHashMap) {
+                    result.push_back(PageIdAndRank(iter.first, iter.second.getCurrentRank(iteration)));
+                }
+
+                ASSERT(result.size() == network.getSize(),
+                       "Invalid result size=" << result.size() << ", for network" << network);
+
                 return result;
             }
         }

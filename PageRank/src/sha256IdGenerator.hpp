@@ -1,15 +1,16 @@
 #ifndef SRC_SHA256IDGENERATOR_HPP_
 #define SRC_SHA256IDGENERATOR_HPP_
 
-#include <unistd.h>
 #include <sys/wait.h>
+#include <unistd.h>
 
 #include "immutable/idGenerator.hpp"
 #include "immutable/pageId.hpp"
 
 class Sha256IdGenerator : public IdGenerator {
 public:
-    virtual PageId generateId(std::string const &content) const {
+    virtual PageId generateId(std::string const& content) const
+    {
         // todo Implement pipes as RAII based on what I have here.
 
         // pipe file descriptors
@@ -27,13 +28,14 @@ public:
             throw std::runtime_error("exec_child_path() neither threw nor exited");
         } else {
             std::string hash = exec_parent_path(
-                    parent_to_child_pipe, child_to_parent_pipe, content);
+                parent_to_child_pipe, child_to_parent_pipe, content);
             return PageId(std::move(hash));
         }
     }
 
 private:
-    void exec_child_path(int *p2c, int *c2p) const {
+    void exec_child_path(int* p2c, int* c2p) const
+    {
         const int READ = 0, WRITE = 1;
         // close unused pipe ends
         close_wrap(p2c[WRITE]);
@@ -50,7 +52,8 @@ private:
         exec_wrap("sha256sum");
     }
 
-    std::string exec_parent_path(int *p2c, int *c2p, std::string const &content) const {
+    std::string exec_parent_path(int* p2c, int* c2p, std::string const& content) const
+    {
         const int READ = 0, WRITE = 1;
 
         const uint hash_length = 64; // sha256 hash has fixed character length
@@ -77,52 +80,59 @@ private:
 
     // Function wrappers replace error codes with exceptions.
 
-    static void pipe_wrap(int *pipedes) {
+    static void pipe_wrap(int* pipedes)
+    {
         if (pipe(pipedes) != 0)
             throw std::runtime_error("Failed pipe() call");
     }
 
-    static pid_t fork_wrap() {
+    static pid_t fork_wrap()
+    {
         pid_t pid = fork();
         if (pid == -1)
             throw std::runtime_error("Failed fork() call");
         return pid;
     }
 
-    static void close_wrap(int fd) {
+    static void close_wrap(int fd)
+    {
         if (close(fd) != 0)
             throw std::runtime_error("Failed close() call");
     }
 
-    static void dup2_wrap(int old_fd, int new_fd) {
+    static void dup2_wrap(int old_fd, int new_fd)
+    {
         if (dup2(old_fd, new_fd) == -1)
             throw std::runtime_error("Failed dup2() call");
     }
 
-    static ssize_t write_wrap(int fd, const void *buf, ssize_t nbytes) {
+    static ssize_t write_wrap(int fd, const void* buf, ssize_t nbytes)
+    {
         ssize_t n = write(fd, buf, nbytes);
         if (n == -1)
             throw std::runtime_error("Failed write() call");
         return n;
     }
 
-    static ssize_t read_wrap(int fd, void *buf, size_t nbytes) {
+    static ssize_t read_wrap(int fd, void* buf, size_t nbytes)
+    {
         ssize_t n = read(fd, buf, nbytes);
         if (n == -1)
             throw std::runtime_error("Failed read() call");
         return n;
     }
 
-    static void wait_wrap() {
+    static void wait_wrap()
+    {
         if (wait(nullptr) == -1)
             throw std::runtime_error("Failed wait() call");
     }
 
-    static void exec_wrap(const char *prog) {
+    static void exec_wrap(const char* prog)
+    {
         if (execlp(prog, prog, nullptr) == -1)
             throw std::runtime_error("Failed execlp() call");
     }
-
 };
 
 #endif /* SRC_SHA256IDGENERATOR_HPP_ */

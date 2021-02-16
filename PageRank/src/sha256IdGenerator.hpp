@@ -11,66 +11,103 @@ class Sha256IdGenerator : public IdGenerator {
 public:
     virtual PageId generateId(std::string const& content) const
     {
+
+//        std::string command = "printf ";
+//        command += "\"";
+//        command += content;
+//        command += "\" | sha256sum";
+//
+//        auto pd = popen(command.data(), "r");
+//
+//        const uint hash_length = 64; // sha256 hash has fixed character length
+//        char buffer[hash_length + 1]; // todo Is it okay? Maybe put it as class member
+//        buffer[hash_length] = '\0';
+//
+//        fgets(buffer, hash_length + 1, pd);
+//        pclose(pd);
+//
+//        return std::string(buffer);
+
         // todo Implement pipes as RAII based on what I have here.
 
-        // pipe file descriptors
-        int parent_to_child_pipe[2];
-        int child_to_parent_pipe[2];
-
-        // create pipes
-        pipe_wrap(parent_to_child_pipe);
-        pipe_wrap(child_to_parent_pipe);
+        Pipe p2c;
+        Pipe c2p;
 
         pid_t pid = fork_wrap();
 
         if (pid == 0) {
-            exec_child_path(parent_to_child_pipe, child_to_parent_pipe);
+            exec_child_path(std::move(p2c), std::move(c2p));
             throw std::runtime_error("exec_child_path() neither threw nor exited");
         } else {
             std::string hash = exec_parent_path(
-                parent_to_child_pipe, child_to_parent_pipe, content);
+                p2c, c2p, content);
             return PageId(std::move(hash));
         }
     }
 
 private:
-    void exec_child_path(int* p2c, int* c2p) const
+    class Pipe {
+        // todo Write better impl
+    public:
+        enum class PipeEnd{READ = 0, WRITE = 1};
+
+        Pipe() : closed{false, false} {
+            pipe_wrap(pipedes);
+        }
+
+        ~Pipe() {
+            close(PipeEnd::WRITE);
+            close(PipeEnd::READ);
+        }
+
+        void close(PipeEnd end) {
+            int end_index = static_cast<int>(end);
+            if (!closed[end_index]) close_wrap(pipedes[end_index]);
+        }
+
+        void write(const void* buf, ssize_t nbytes) const {
+            write_wrap(static_cast<int>(PipeEnd::WRITE), buf, nbytes);
+        }
+
+        void read(void* buf, size_t nbytes) const {
+            read_wrap(static_cast<int>(PipeEnd::READ), buf, nbytes);
+        }
+
+        void dup(PipeEnd end, int fd) {
+            dup2_wrap(pipedes[static_cast<int>(end)], fd);
+        }
+
+    private:
+        int pipedes[2];
+        bool closed[2];
+    };
+
+    void exec_child_path(Pipe && p2c, Pipe && c2p) const
     {
-        const int READ = 0, WRITE = 1;
-        // close unused pipe ends
-        close_wrap(p2c[WRITE]);
-        close_wrap(c2p[READ]);
 
-        // swap std streams with pipe ends
-        dup2_wrap(p2c[READ], STDIN_FILENO);
-        dup2_wrap(c2p[WRITE], STDOUT_FILENO);
+        p2c.dup(Pipe::PipeEnd::READ, STDIN_FILENO);
+        c2p.dup(Pipe::PipeEnd::WRITE, STDOUT_FILENO);
 
-        // close pipe ends because they were duplicated
-        close_wrap(p2c[READ]);
-        close_wrap(c2p[WRITE]);
+        // todo close pipe explicitly?
 
         exec_wrap("sha256sum");
     }
 
-    std::string exec_parent_path(int* p2c, int* c2p, std::string const& content) const
+    std::string exec_parent_path(Pipe & p2c, Pipe & c2p, std::string const& content) const
     {
-        const int READ = 0, WRITE = 1;
 
         const uint hash_length = 64; // sha256 hash has fixed character length
         char buffer[hash_length + 1]; // todo Is it okay? Maybe put it as class member
         buffer[hash_length] = '\0';
 
-        // close unused pipe ends
-        close_wrap(p2c[READ]);
-        close_wrap(c2p[WRITE]);
+        p2c.close(Pipe::PipeEnd::READ);
+        c2p.close(Pipe::PipeEnd::WRITE);
 
-        // send data to child process
-        write_wrap(p2c[WRITE], content.data(), content.size());
-        close_wrap(p2c[WRITE]);
+        p2c.write(content.data(), content.size());
+        p2c.close(Pipe::PipeEnd::WRITE);
 
-        // receive result from child process
-        read_wrap(c2p[READ], buffer, hash_length);
-        close_wrap(c2p[READ]);
+        c2p.read(buffer, hash_length);
+        c2p.close(Pipe::PipeEnd::READ);
 
         // wait for the child to finish and release its resources
         wait_wrap();

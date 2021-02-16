@@ -13,7 +13,6 @@
 #include "immutable/pageIdAndRank.hpp"
 #include "immutable/pageRankComputer.hpp"
 
-#include "singleThreadedPageRankComputer.hpp" // todo RT
 #include <iostream> // todo RT
 
 // NOTATKI:
@@ -28,6 +27,133 @@
 // metody dostępu do poprzednich wartości rang stron, które linkują do danej
 // strony:
 
+// todo REMOVE START
+class Timer {
+public:
+    void start() {
+        m_StartTime = std::chrono::system_clock::now();
+        m_bRunning = true;
+    }
+
+    void stop() {
+        m_EndTime = std::chrono::system_clock::now();
+        m_bRunning = false;
+    }
+
+    double elapsedNanoseconds() {
+        std::chrono::time_point<std::chrono::system_clock> endTime;
+
+        if (m_bRunning) {
+            endTime = std::chrono::system_clock::now();
+        } else {
+            endTime = m_EndTime;
+        }
+
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(endTime - m_StartTime).count();
+
+    }
+
+    double elapsedMicorseconds() {
+        return elapsedNanoseconds() / 1000.0;
+    }
+
+    double elapsedMilliseconds() {
+        return elapsedMicorseconds() / 1000.0;
+    }
+
+    double elapsedSeconds() {
+        return elapsedMilliseconds() / 1000.0;
+    }
+
+private:
+    std::chrono::time_point<std::chrono::system_clock> m_StartTime;
+    std::chrono::time_point<std::chrono::system_clock> m_EndTime;
+    bool m_bRunning = false;
+};
+
+template<typename F>
+void measure_time(F func, std::string name) {
+    Timer timer;
+    timer.start();
+    func();
+    timer.stop();
+    std::cerr << name << " took: " << timer.elapsedMilliseconds() << "ms" << "\n";
+}
+
+// todo REMOVE END
+
+// PAGEID CONCURRENT ALGOS
+void generatePageIds_sequential(Network const &network) {
+    for (auto &page : network.getPages()) {
+        page.generateId(network.getGenerator());
+    }
+}
+
+void generatePageIds_concurrent_strided(Network const &network, uint32_t numThreads) {
+    auto func = [&network, numThreads](int id) {
+        auto &pages = network.getPages();
+        auto &generator = network.getGenerator();
+
+        for (size_t i = id; i < pages.size(); i += numThreads) {
+            pages[i].generateId(generator);
+        }
+    };
+
+    std::vector<std::thread> threads;
+    for (uint32_t i = 0; i < numThreads; i++)
+        threads.emplace_back(func, i);
+    for (auto &thread : threads) thread.join();
+}
+
+void generatePageIds_concurrent_queued(Network const &network, uint32_t numThreads) {
+    // todo This is the best so far.
+    // If all pages have same content to hash, this is just slightly worse, but
+    // for unevenly distributed content sizes it is be better than strided version.
+
+    std::atomic<size_t> index(0);
+
+    auto func = [&network, numThreads, &index] {
+        auto &pages = network.getPages();
+        auto &generator = network.getGenerator();
+        size_t fetched;
+
+        while ((fetched = index.fetch_add(1)) < pages.size()) {
+            pages[fetched].generateId(generator);
+        }
+    };
+
+    std::vector<std::thread> threads;
+    for (uint32_t i = 0; i < numThreads; i++)
+        threads.emplace_back(func);
+    for (auto &thread : threads) thread.join();
+}
+
+void generatePageIds_concurrent_mutexed(Network const &network, uint32_t numThreads) {
+    std::mutex mutex;
+    size_t index = 0;
+
+    auto func = [&network, numThreads, &mutex, &index] {
+        auto &pages = network.getPages();
+        auto &generator = network.getGenerator();
+        size_t fetched;
+
+        while(true) {
+            {
+                std::lock_guard<std::mutex>lck(mutex);
+                fetched = index++;
+            }
+
+            if (fetched >= pages.size()) break;
+            pages[fetched].generateId(generator);
+        }
+    };
+
+    std::vector<std::thread> threads;
+    for (uint32_t i = 0; i < numThreads; i++)
+        threads.emplace_back(func);
+    for (auto &thread : threads) thread.join();
+}
+
 
 class MultiThreadedPageRankComputer : public PageRankComputer {
 public:
@@ -38,9 +164,19 @@ public:
                       uint32_t iterations, double tolerance) const {
 
         // todo parallelize
-        for (auto const &page : network.getPages()) {
-            page.generateId(network.getGenerator());
-        }
+//        for (auto const &page : network.getPages()) {
+//            page.generateId(network.getGenerator());
+//        }
+
+
+//        measure_time([&network] { generatePageIds_sequential(network); },
+//                     "Sequential");
+//        measure_time([&network, this] { generatePageIds_concurrent_strided(network, numThreads); },
+//                     "Concurrent strided");
+        measure_time([&network, this] { generatePageIds_concurrent_queued(network, numThreads); },
+                     "Concurrent queued");
+//        measure_time([&network, this] { generatePageIds_concurrent_mutexed(network, numThreads); },
+//                     "Concurrent mutexed");
 
         std::unordered_map<PageId, PageInfo, PageIdHash> pageHashMap;
         std::unordered_map<PageId, std::vector<PageId>, PageIdHash> edges;

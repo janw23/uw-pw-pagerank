@@ -12,10 +12,9 @@ public:
     virtual PageId generateId(std::string const& content) const
     {
         // todo maybe command can be created more efficiently?
-        std::string command = "printf ";
-        command += "\"";
-        command += content;
-        command += "\" | sha256sum";
+        std::string command;
+        command.reserve(content.size() + 30);
+        command.append("printf \"").append(content).append("\" | sha256sum");
 
         auto pd = popen(command.data(), "r");
 
@@ -23,7 +22,7 @@ public:
         char buffer[hash_length + 1]; // todo Is it okay? Maybe put it as class member
         buffer[hash_length] = '\0';
 
-        fgets(buffer, hash_length + 1, pd);
+        fgets(buffer, hash_length + 1, pd); // todo Why does it need to be hashlength + 1?
         pclose(pd);
 
         return std::string(buffer);

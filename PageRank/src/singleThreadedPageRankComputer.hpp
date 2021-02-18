@@ -52,7 +52,7 @@ public:
             double difference = 0;
 
             for (auto& pageMapElem : pageHashMap) {
-                PageId pageId = pageMapElem.first;
+                PageId const& pageId = pageMapElem.first;
                 PageInfo& pageInfo = pageMapElem.second;
 
                 double danglingWeight = 1.0 / network.getSize();

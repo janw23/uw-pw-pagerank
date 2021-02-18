@@ -177,7 +177,7 @@ updateRanks_sequential(std::unordered_map<PageId, P, PageIdHash> &pageHashMap,
     double pageRankCumulativeChange = 0;
 
     for (auto &pageMapElem : pageHashMap) {
-        PageId const& pageId = pageMapElem.first;
+        PageId const &pageId = pageMapElem.first;
         P &pageInfo = pageMapElem.second;
 
         double danglingWeight = 1.0 / networkSize;
@@ -193,6 +193,67 @@ updateRanks_sequential(std::unordered_map<PageId, P, PageIdHash> &pageHashMap,
         PageRank rankDifference = pageInfo.setCurrentRank(iteration, newRank);
         dangleSumChange += rankDifference * pageInfo.isDangling;
         pageRankCumulativeChange += std::abs(rankDifference);
+    }
+
+    return std::make_pair(pageRankCumulativeChange, dangleSumChange);
+}
+
+template<typename P>
+std::pair<double, double>
+updateRanks_concurrent(std::unordered_map<PageId, P, PageIdHash> &pageHashMap,
+                       std::unordered_map<PageId, EdgeInfo, PageIdHash> &edges,
+                       size_t networkSize, double dangleSum, double alpha, uint32_t iteration,
+                       uint32_t numThreads) {
+
+    std::mutex mutex;
+    auto pageMapIter = pageHashMap.begin();
+
+    auto func = [&pageHashMap, &edges, networkSize, dangleSum, alpha, iteration, &mutex, &pageMapIter] {
+
+        double dangleSumChange = 0;
+        double pageRankCumulativeChange = 0;
+        decltype(pageMapIter) fetchedIter;
+
+        while (true) {
+            {
+                std::lock_guard<std::mutex> lck(mutex);
+                fetchedIter = pageMapIter;
+                if (pageMapIter != pageHashMap.end()) pageMapIter++;
+                else break;
+            }
+
+            auto &pageMapElem = *fetchedIter;
+            PageId const &pageId = pageMapElem.first;
+            P &pageInfo = pageMapElem.second;
+
+            double danglingWeight = 1.0 / networkSize;
+            PageRank newRank =
+                    dangleSum * alpha * danglingWeight + (1.0 - alpha) / networkSize;
+
+            if (edges.count(pageId) > 0) {
+                for (auto const &link : edges[pageId].links) {
+                    newRank += alpha * pageHashMap[link].getLinkValue(iteration);
+                }
+            }
+
+            PageRank rankDifference = pageInfo.setCurrentRank(iteration, newRank);
+            dangleSumChange += rankDifference * pageInfo.isDangling;
+            pageRankCumulativeChange += std::abs(rankDifference);
+        }
+
+        return std::make_pair(pageRankCumulativeChange, dangleSumChange);
+    };
+
+    std::vector<std::future<std::pair<double, double>>> futures;
+    for (uint32_t i = 0; i < numThreads; i++) {
+        futures.push_back(std::async(func));
+    }
+
+    double pageRankCumulativeChange = 0, dangleSumChange = 0;
+    for (auto &fut : futures) {
+        auto const &changes = fut.get();
+        pageRankCumulativeChange += changes.first;
+        dangleSumChange += changes.second;
     }
 
     return std::make_pair(pageRankCumulativeChange, dangleSumChange);
@@ -253,8 +314,18 @@ public:
 //                difference += std::abs(rankDifference);
 //            }
 
-            auto changes = updateRanks_sequential(pageHashMap, edges, network.getSize(),
-                                                  dangleSum, alpha, iteration);
+            std::pair<double, double> changes;
+            switch (1) {
+                case 0:
+                    changes = updateRanks_sequential(pageHashMap, edges, network.getSize(),
+                                                     dangleSum, alpha, iteration);
+                    break;
+                case 1:
+                    changes = updateRanks_concurrent(pageHashMap, edges, network.getSize(),
+                                                     dangleSum, alpha, iteration, numThreads);
+                    break;
+            }
+
             auto difference = changes.first;
             auto dangleSumChange = changes.second;
             dangleSum += dangleSumChange;
@@ -268,7 +339,7 @@ public:
 
                 ASSERT(result.size() == network.getSize(),
                        "Invalid changes size=" << result.size() << ", for network"
-                                              << network);
+                                               << network);
 
                 return result;
             }

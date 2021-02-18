@@ -129,11 +129,11 @@ void initEdges_sequential(Network const &network,
 
     // todo check the performance hit of this loop (which is nod needed here in sequential version)
     // todo Remember in struct which pages were already put in hashmap?
-    for (auto const& page : network.getPages()) {
-        for (auto const& link : page.getLinks()) {
-            edges[link];
-        }
-    }
+//    for (auto const& page : network.getPages()) {
+//        for (auto const& link : page.getLinks()) {
+//            edges[link];
+//        }
+//    }
 
     for (auto const &page : network.getPages()) {
         for (auto const &link : page.getLinks()) {
@@ -142,7 +142,7 @@ void initEdges_sequential(Network const &network,
     }
 }
 
-// todo I got ideas for better impls
+
 template<typename E>
 void initEdges_concurrent_strided(Network const &network,
                                   std::unordered_map<PageId, E, PageIdHash> &edges,
@@ -250,6 +250,7 @@ void initEdges_concurrent_slightly_queued(Network const &network,
             auto const &page = pages[fetchedPageIndex];
 
             for (auto const &link : page.getLinks()) {
+                // todo Try version with try_lock?
                 edges[link].push_back(page.getId());
             }
         }
@@ -316,8 +317,8 @@ public:
         generatePageIds_concurrent_queued(network, numThreads);
 
         std::unordered_map<PageId, PageInfo, PageIdHash> pageHashMap;
-        std::unordered_map<PageId, std::vector<PageId>, PageIdHash> edges;
-        //std::unordered_map<PageId, EdgeInfo, PageIdHash> edges;
+        //std::unordered_map<PageId, std::vector<PageId>, PageIdHash> edges;
+        std::unordered_map<PageId, EdgeInfo, PageIdHash> edges;
 
         size_t danglingCount = 0;
         const PageRank initialRank = 1.0 / network.getSize();
@@ -341,7 +342,7 @@ public:
 //            }
 //        }
 
-        switch (4) {
+        switch (0) {
             case 0:
                 measure_time([&network, &edges] { initEdges_sequential(network, edges); },
                              "Init edges sequential");
@@ -388,7 +389,7 @@ public:
                         prevDangleSum * alpha * danglingWeight + (1.0 - alpha) / network.getSize();
 
                 if (edges.count(pageId) > 0) {
-                    for (auto link : edges[pageId]) {
+                    for (auto link : edges[pageId].links) {
                         newRank += alpha * pageHashMap[link].getLinkValue(iteration);
                     }
                 }

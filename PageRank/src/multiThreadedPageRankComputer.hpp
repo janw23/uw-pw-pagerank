@@ -100,7 +100,7 @@ void generatePageIds_sequential(Network const &network) {
     }
 }
 
-void generatePageIds_concurrent_queued(Network const &network, uint32_t numThreads) {
+void generatePageIds_concurrent(Network const &network, uint32_t numThreads) {
     // It's just very slightly worse than strided on evenly sized data, but much
     // better on unevenly distributed.
 
@@ -134,9 +134,9 @@ void initEdges_sequential(Network const &network,
 }
 
 template<typename E>
-void initEdges_concurrent_slightly_queued(Network const &network,
-                                          std::unordered_map<PageId, E, PageIdHash> &edges,
-                                          uint32_t numThreads) {
+void initEdges_concurrent(Network const &network,
+                          std::unordered_map<PageId, E, PageIdHash> &edges,
+                          uint32_t numThreads) {
 
     for (auto const &page : network.getPages()) {
         for (auto const &link : page.getLinks()) {
@@ -166,70 +166,6 @@ void initEdges_concurrent_slightly_queued(Network const &network,
         thread.join();
 }
 
-void initEdges_concurrent_slightly_queued_try_lock(Network const &network,
-                                          std::unordered_map<PageId, EdgeInfo, PageIdHash> &edges,
-                                          uint32_t numThreads) {
-
-    // todo From testing, this  is the fastest version, but very slightly
-    // todo and generally don't worth the gain
-
-    for (auto const &page : network.getPages()) {
-        for (auto const &link : page.getLinks()) {
-            edges[link];
-        }
-    }
-
-    std::atomic<size_t> pageIndex(0);
-
-    auto func = [&network, &edges, &pageIndex] {
-        auto const &pages = network.getPages();
-
-        size_t fetchedPageIndex;
-        while ((fetchedPageIndex = pageIndex.fetch_add(1)) < pages.size()) {
-            auto const &page = pages[fetchedPageIndex];
-
-            auto const& links = page.getLinks();
-            std::vector<EdgeInfo*> notDone;
-
-            for (auto const &link : page.getLinks()) {
-                auto & edge = edges[link];
-
-                std::unique_lock<std::mutex> lck(edge.mutex, std::defer_lock);
-                bool locked = lck.try_lock();
-
-                if (!locked) {
-                    notDone.push_back(&edge);
-                } else {
-                    edge.links.push_back(page.getId());
-                }
-            }
-
-            size_t index = 0;
-            while (!notDone.empty()) {
-                index = (index + 1) % notDone.size();
-                auto & edge = *notDone[index];
-
-                std::unique_lock<std::mutex> lck(edge.mutex, std::defer_lock);
-                bool locked = lck.try_lock();
-
-                if (locked) {
-                    edge.links.push_back(page.getId());
-                    lck.unlock();
-
-                    std::swap(notDone[index], notDone[notDone.size() - 1]);
-                    notDone.pop_back();
-                }
-            }
-        }
-    };
-
-    std::vector<std::thread> threads;
-    for (uint32_t i = 0; i < numThreads; i++)
-        threads.emplace_back(func);
-    for (auto &thread : threads)
-        thread.join();
-}
-
 class MultiThreadedPageRankComputer : public PageRankComputer {
 public:
     MultiThreadedPageRankComputer(uint32_t numThreadsArg)
@@ -240,10 +176,9 @@ public:
                       uint32_t iterations, double tolerance) const {
 
         // todo write cleaner code
-        generatePageIds_concurrent_queued(network, numThreads);
+        generatePageIds_concurrent(network, numThreads);
 
         std::unordered_map<PageId, PageInfo, PageIdHash> pageHashMap;
-        //std::unordered_map<PageId, std::vector<PageId>, PageIdHash> edges;
         std::unordered_map<PageId, EdgeInfo, PageIdHash> edges;
 
         size_t danglingCount = 0;
@@ -258,34 +193,7 @@ public:
             pageHashMap[page.getId()] = PageInfo(initialRank, linksNum, isDangling);
         }
 
-
-        // todo parallelize
-        // Prepare this structure using synchronized hashmap access (prob better)
-        // or keep this data in the struct and update online?
-//        for (auto page : network.getPages()) {
-//            for (auto link : page.getLinks()) {
-//                edges[link].push_back(page.getId());
-//            }
-//        }
-
-        switch (2) {
-            case 0:
-                measure_time([&network, &edges] { initEdges_sequential(network, edges); },
-                             "Init edges sequential");
-                break;
-            case 1:
-                measure_time([&network, &edges, this] {
-                                 initEdges_concurrent_slightly_queued(network, edges, numThreads);
-                             },
-                             "Init edges slightly queued");
-                break;
-            case 2:
-                measure_time([&network, &edges, this] {
-                                 initEdges_concurrent_slightly_queued_try_lock(network, edges, numThreads);
-                             },
-                             "Init edges slightly queued (try lock)");
-                break;
-        }
+        initEdges_concurrent(network, edges, numThreads);
 
         double dangleSum = initialRank * danglingCount;
 
@@ -302,7 +210,7 @@ public:
                         prevDangleSum * alpha * danglingWeight + (1.0 - alpha) / network.getSize();
 
                 if (edges.count(pageId) > 0) {
-                    for (auto link : edges[pageId].links) {
+                    for (auto const& link : edges[pageId].links) {
                         newRank += alpha * pageHashMap[link].getLinkValue(iteration);
                     }
                 }

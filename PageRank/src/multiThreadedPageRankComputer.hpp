@@ -126,113 +126,17 @@ void generatePageIds_concurrent_queued(Network const &network, uint32_t numThrea
 template<typename E>
 void initEdges_sequential(Network const &network,
                           std::unordered_map<PageId, E, PageIdHash> &edges) {
-
-    // todo check the performance hit of this loop (which is nod needed here in sequential version)
-    // todo Remember in struct which pages were already put in hashmap?
-//    for (auto const& page : network.getPages()) {
-//        for (auto const& link : page.getLinks()) {
-//            edges[link];
-//        }
-//    }
-
     for (auto const &page : network.getPages()) {
         for (auto const &link : page.getLinks()) {
             edges[link].push_back(page.getId());
         }
     }
-}
-
-
-template<typename E>
-void initEdges_concurrent_strided(Network const &network,
-                                  std::unordered_map<PageId, E, PageIdHash> &edges,
-                                  uint32_t numThreads) {
-
-    for (auto const &page : network.getPages()) {
-        for (auto const &link : page.getLinks()) {
-            edges[link];
-        }
-    }
-
-    auto func = [&network, &edges, numThreads](uint32_t id) {
-        auto const &pages = network.getPages();
-
-        for (uint32_t i = id; i < pages.size(); i += numThreads) {
-            for (auto const &link : pages[i].getLinks()) {
-                edges[link].push_back(pages[i].getId());
-            }
-        }
-    };
-
-    std::vector<std::thread> threads;
-    for (uint32_t i = 0; i < numThreads; i++)
-        threads.emplace_back(func, i);
-    for (auto &thread : threads)
-        thread.join();
-}
-
-template<typename E>
-void initEdges_concurrent_very_queued(Network const &network,
-                                      std::unordered_map<PageId, E, PageIdHash> &edges,
-                                      uint32_t numThreads) {
-
-    std::vector<size_t> notDanglingPages;
-    auto const &pages = network.getPages();
-
-
-    for (size_t i = 0; i < pages.size(); i++) {
-        if (pages[i].getLinks().size() > 0) {
-            notDanglingPages.push_back(i);
-        }
-        for (auto const &link : pages[i].getLinks()) {
-            edges[link];
-        }
-    }
-
-    std::mutex mutex;
-    uint32_t index = 0;
-    uint32_t linkIndex = 0;
-
-    auto func = [&network, &notDanglingPages, &edges, &mutex, &index, &linkIndex] {
-        auto const &pages = network.getPages();
-
-        while (true) {
-            uint32_t fetchedPageIndex, fetchedLinkIndex;
-            {
-                std::lock_guard<std::mutex> lck(mutex);
-                if (index >= notDanglingPages.size()) break;
-
-                fetchedPageIndex = notDanglingPages[index];
-                fetchedLinkIndex = linkIndex;
-
-                linkIndex++;
-
-                if (linkIndex >= pages[fetchedPageIndex].getLinks().size()) {
-                    linkIndex = 0;
-                    index++;
-                }
-            }
-
-            auto const &page = pages[fetchedPageIndex];
-            auto const &link = page.getLinks()[fetchedLinkIndex];
-            edges[link].push_back(page.getId());
-        }
-    };
-
-    std::vector<std::thread> threads;
-    for (uint32_t i = 0; i < numThreads; i++)
-        threads.emplace_back(func);
-    for (auto &thread : threads)
-        thread.join();
 }
 
 template<typename E>
 void initEdges_concurrent_slightly_queued(Network const &network,
                                           std::unordered_map<PageId, E, PageIdHash> &edges,
                                           uint32_t numThreads) {
-
-    // todo From tests this seems to be the best, but test it against
-    // todo sequential without edges initialization in nested loop.
 
     for (auto const &page : network.getPages()) {
         for (auto const &link : page.getLinks()) {
@@ -250,7 +154,6 @@ void initEdges_concurrent_slightly_queued(Network const &network,
             auto const &page = pages[fetchedPageIndex];
 
             for (auto const &link : page.getLinks()) {
-                // todo Try version with try_lock?
                 edges[link].push_back(page.getId());
             }
         }
@@ -263,10 +166,12 @@ void initEdges_concurrent_slightly_queued(Network const &network,
         thread.join();
 }
 
-template<typename E>
-void initEdges_concurrent_synchronized(Network const &network,
-                                                std::unordered_map<PageId, E, PageIdHash> &edges,
-                                                uint32_t numThreads) {
+void initEdges_concurrent_slightly_queued_try_lock(Network const &network,
+                                          std::unordered_map<PageId, EdgeInfo, PageIdHash> &edges,
+                                          uint32_t numThreads) {
+
+    // todo From testing, this  is the fastest version, but very slightly
+    // todo and generally don't worth the gain
 
     for (auto const &page : network.getPages()) {
         for (auto const &link : page.getLinks()) {
@@ -274,35 +179,56 @@ void initEdges_concurrent_synchronized(Network const &network,
         }
     }
 
-    std::atomic<uint32_t> counter(0);
+    std::atomic<size_t> pageIndex(0);
 
-    auto func = [&network, &edges, numThreads, &counter](size_t id) {
+    auto func = [&network, &edges, &pageIndex] {
         auto const &pages = network.getPages();
-        size_t pageIndex = 0;
 
-        while (pageIndex < network.getSize()) {
-            auto const &page = pages[pageIndex];
-            auto const &links = page.getLinks();
+        size_t fetchedPageIndex;
+        while ((fetchedPageIndex = pageIndex.fetch_add(1)) < pages.size()) {
+            auto const &page = pages[fetchedPageIndex];
 
-            for (size_t i = id; i < links.size(); i += numThreads) {
-                edges[links[i]].push_back(page.getId());
+            auto const& links = page.getLinks();
+            std::vector<EdgeInfo*> notDone;
+
+            for (auto const &link : page.getLinks()) {
+                auto & edge = edges[link];
+
+                std::unique_lock<std::mutex> lck(edge.mutex, std::defer_lock);
+                bool locked = lck.try_lock();
+
+                if (!locked) {
+                    notDone.push_back(&edge);
+                } else {
+                    edge.links.push_back(page.getId());
+                }
             }
 
-            counter++;
-            while (counter.load() < numThreads * (pageIndex + 1))
-                std::this_thread::yield();
+            size_t index = 0;
+            while (!notDone.empty()) {
+                index = (index + 1) % notDone.size();
+                auto & edge = *notDone[index];
 
-            pageIndex++; // this is thread-local variable
+                std::unique_lock<std::mutex> lck(edge.mutex, std::defer_lock);
+                bool locked = lck.try_lock();
+
+                if (locked) {
+                    edge.links.push_back(page.getId());
+                    lck.unlock();
+
+                    std::swap(notDone[index], notDone[notDone.size() - 1]);
+                    notDone.pop_back();
+                }
+            }
         }
     };
 
     std::vector<std::thread> threads;
     for (uint32_t i = 0; i < numThreads; i++)
-        threads.emplace_back(func, i);
+        threads.emplace_back(func);
     for (auto &thread : threads)
         thread.join();
 }
-
 
 class MultiThreadedPageRankComputer : public PageRankComputer {
 public:
@@ -342,35 +268,22 @@ public:
 //            }
 //        }
 
-        switch (0) {
+        switch (2) {
             case 0:
                 measure_time([&network, &edges] { initEdges_sequential(network, edges); },
                              "Init edges sequential");
                 break;
             case 1:
                 measure_time([&network, &edges, this] {
-                                 initEdges_concurrent_strided(network, edges, numThreads);
-                             },
-                             "Init edges strided");
-                break;
-            case 2:
-                measure_time([&network, &edges, this] {
-                                 initEdges_concurrent_very_queued(network, edges, numThreads);
-                             },
-                             "Init edges very queued");
-                break;
-            case 3:
-                measure_time([&network, &edges, this] {
                                  initEdges_concurrent_slightly_queued(network, edges, numThreads);
                              },
                              "Init edges slightly queued");
                 break;
-            case 4:
-                // todo remember this needs standard edges implementation
+            case 2:
                 measure_time([&network, &edges, this] {
-                                 initEdges_concurrent_synchronized(network, edges, numThreads);
+                                 initEdges_concurrent_slightly_queued_try_lock(network, edges, numThreads);
                              },
-                             "Init edges synchronized");
+                             "Init edges slightly queued (try lock)");
                 break;
         }
 

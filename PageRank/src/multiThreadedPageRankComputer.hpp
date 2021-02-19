@@ -166,6 +166,71 @@ void initEdges_concurrent(Network const &network,
         thread.join();
 }
 
+template<typename I>
+struct AtomicIterator {
+    AtomicIterator(I start, I end) : mutex(), current(start), end(end) {};
+    AtomicIterator(const AtomicIterator<I>& other) : mutex(), current(other.current), end(other.end) {};
+    AtomicIterator(const AtomicIterator<I>&& other) : mutex(),
+                                                      current(std::move(other.current)), end(std::move(other.end)) {};
+
+    I fetch_advance(size_t dist) {
+        std::lock_guard<std::mutex> lck(mutex);
+
+        I fetched = current;
+
+        for (size_t i = 0; i < dist && current != end; i++)
+            current++;
+
+        return fetched;
+    };
+
+    std::mutex mutex;
+    I current;
+    I end;
+};
+
+template<typename E>
+void initEdges_concurrent_hybrid(Network const &network,
+                          std::unordered_map<PageId, E, PageIdHash> &edges,
+                          uint32_t numThreads) {
+
+    for (auto const &page : network.getPages()) {
+        for (auto const &link : page.getLinks()) {
+            edges[link];
+        }
+    }
+
+    using MapIter = size_t;
+    std::vector<std::shared_ptr<std::atomic<size_t>>> threadsIters;
+
+    for (size_t i = 0; i < numThreads; i++) {
+        threadsIters.push_back(std::make_shared<std::atomic<size_t>>(i));
+    }
+
+    auto func = [&network, &edges, &threadsIters, numThreads](uint32_t id) {
+        auto const &pages = network.getPages();
+
+        for (uint32_t offset = 0; offset < numThreads; offset++) {
+            uint32_t threadJobId = (id + offset) % numThreads;
+
+            size_t fetchedPageIndex;
+            while ((fetchedPageIndex = threadsIters[threadJobId]->fetch_add(numThreads)) < pages.size()) {
+                auto const &page = pages[fetchedPageIndex];
+
+                for (auto const &link : page.getLinks()) {
+                    edges[link].push_back(page.getId());
+                }
+            }
+        }
+    };
+
+    std::vector<std::thread> threads;
+    for (uint32_t i = 0; i < numThreads; i++)
+        threads.emplace_back(func, i);
+    for (auto &thread : threads)
+        thread.join();
+}
+
 // todo Replace template P with PageInfo
 template<typename P>
 std::pair<double, double>
@@ -272,29 +337,6 @@ updateRanks_concurrent(std::unordered_map<PageId, P, PageIdHash> &pageHashMap,
     return std::make_pair(pageRankCumulativeChange, dangleSumChange);
 }
 
-template<typename I>
-struct AtomicIterator {
-    AtomicIterator(I start, I end) : mutex(), current(start), end(end) {};
-    AtomicIterator(const AtomicIterator<I>& other) : mutex(), current(other.current), end(other.end) {};
-    AtomicIterator(const AtomicIterator<I>&& other) : mutex(),
-    current(std::move(other.current)), end(std::move(other.end)) {};
-
-    I fetch_advance(size_t dist) {
-        std::lock_guard<std::mutex> lck(mutex);
-
-        I fetched = current;
-
-        for (size_t i = 0; i < dist && current != end; i++)
-            current++;
-
-        return fetched;
-    };
-
-    std::mutex mutex;
-    I current;
-    I end;
-};
-
 template<typename P>
 std::pair<double, double>
 updateRanks_concurrent_hybrid(std::unordered_map<PageId, P, PageIdHash> &pageHashMap,
@@ -385,7 +427,14 @@ public:
             pageHashMap[page.getId()] = PageInfo(initialRank, linksNum, isDangling);
         }
 
-        initEdges_concurrent(network, edges, numThreads);
+        switch(0) {
+            case 0:
+                measure_time([&network, &edges, this]{initEdges_concurrent(network, edges, numThreads);}, "queued");
+                break;
+            case 1:
+                measure_time([&network, &edges, this]{initEdges_concurrent_hybrid(network, edges, numThreads);}, "hybrid");
+                break;
+        }
 
         double dangleSum = initialRank * danglingCount;
 

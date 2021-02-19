@@ -83,417 +83,41 @@ void measure_time(F func, std::string name) {
 
 // todo REMOVE END
 
-// todo Put it in better place
-struct EdgeInfo {
-    std::vector<PageId> links;
-    std::mutex mutex;
-
-    void push_back(PageId elem) {
-        std::lock_guard<std::mutex> lck(mutex);
-        links.push_back(elem);
-    }
-};
-
-void generatePageIds_sequential(Network const &network) {
-    for (auto &page : network.getPages()) {
-        page.generateId(network.getGenerator());
-    }
-}
-
-void generatePageIds_concurrent(Network const &network, uint32_t numThreads) {
-    // It's just very slightly worse than strided on evenly sized data, but much
-    // better on unevenly distributed.
-
-    std::atomic<size_t> index(0);
-
-    auto func = [&network, &index] {
-        auto &pages = network.getPages();
-        auto &generator = network.getGenerator();
-        size_t fetched;
-
-        while ((fetched = index.fetch_add(1)) < pages.size()) {
-            pages[fetched].generateId(generator);
-        }
-    };
-
-    std::vector<std::thread> threads;
-    for (uint32_t i = 0; i < numThreads; i++)
-        threads.emplace_back(func);
-    for (auto &thread : threads)
-        thread.join();
-}
-
-template<typename E>
-void initEdges_sequential(Network const &network,
-                          std::unordered_map<PageId, E, PageIdHash> &edges) {
-    for (auto const &page : network.getPages()) {
-        for (auto const &link : page.getLinks()) {
-            edges[link].push_back(page.getId());
-        }
-    }
-}
-
-template<typename E>
-void initEdges_concurrent(Network const &network,
-                          std::unordered_map<PageId, E, PageIdHash> &edges,
-                          uint32_t numThreads) {
-
-    for (auto const &page : network.getPages()) {
-        for (auto const &link : page.getLinks()) {
-            edges[link];
-        }
-    }
-
-    std::atomic<size_t> pageIndex(0);
-
-    auto func = [&network, &edges, &pageIndex] {
-        auto const &pages = network.getPages();
-
-        size_t fetchedPageIndex;
-        while ((fetchedPageIndex = pageIndex.fetch_add(1)) < pages.size()) {
-            auto const &page = pages[fetchedPageIndex];
-
-            for (auto const &link : page.getLinks()) {
-                edges[link].push_back(page.getId());
-            }
-        }
-    };
-
-    std::vector<std::thread> threads;
-    for (uint32_t i = 0; i < numThreads; i++)
-        threads.emplace_back(func);
-    for (auto &thread : threads)
-        thread.join();
-}
-
-template<typename I>
-struct AtomicIterator {
-    AtomicIterator(I start, I end) : mutex(), current(start), end(end) {};
-    AtomicIterator(const AtomicIterator<I>& other) : mutex(), current(other.current), end(other.end) {};
-    AtomicIterator(const AtomicIterator<I>&& other) : mutex(),
-                                                      current(std::move(other.current)), end(std::move(other.end)) {};
-
-    I fetch_advance(size_t dist) {
-        std::lock_guard<std::mutex> lck(mutex);
-
-        I fetched = current;
-
-        for (size_t i = 0; i < dist && current != end; i++)
-            current++;
-
-        return fetched;
-    };
-
-    std::mutex mutex;
-    I current;
-    I end;
-};
-
-template<typename E>
-void initEdges_concurrent_hybrid(Network const &network,
-                          std::unordered_map<PageId, E, PageIdHash> &edges,
-                          uint32_t numThreads) {
-
-    for (auto const &page : network.getPages()) {
-        for (auto const &link : page.getLinks()) {
-            edges[link];
-        }
-    }
-
-    using MapIter = size_t;
-    std::vector<std::shared_ptr<std::atomic<size_t>>> threadsIters;
-
-    for (size_t i = 0; i < numThreads; i++) {
-        threadsIters.push_back(std::make_shared<std::atomic<size_t>>(i));
-    }
-
-    auto func = [&network, &edges, &threadsIters, numThreads](uint32_t id) {
-        auto const &pages = network.getPages();
-
-        for (uint32_t offset = 0; offset < numThreads; offset++) {
-            uint32_t threadJobId = (id + offset) % numThreads;
-
-            size_t fetchedPageIndex;
-            while ((fetchedPageIndex = threadsIters[threadJobId]->fetch_add(numThreads)) < pages.size()) {
-                auto const &page = pages[fetchedPageIndex];
-
-                for (auto const &link : page.getLinks()) {
-                    edges[link].push_back(page.getId());
-                }
-            }
-        }
-    };
-
-    std::vector<std::thread> threads;
-    for (uint32_t i = 0; i < numThreads; i++)
-        threads.emplace_back(func, i);
-    for (auto &thread : threads)
-        thread.join();
-}
-
-// todo Replace template P with PageInfo
-template<typename P>
-std::pair<double, double>
-updateRanks_sequential(std::unordered_map<PageId, P, PageIdHash> &pageHashMap,
-                       std::unordered_map<PageId, EdgeInfo, PageIdHash> &edges,
-                       size_t networkSize, double dangleSum, double alpha, uint32_t iteration) {
-
-    double dangleSumChange = 0;
-    double pageRankCumulativeChange = 0;
-
-    for (auto &pageMapElem : pageHashMap) {
-        PageId const &pageId = pageMapElem.first;
-        P &pageInfo = pageMapElem.second;
-
-        double danglingWeight = 1.0 / networkSize;
-        PageRank newRank = dangleSum * alpha * danglingWeight + (1.0 - alpha) / networkSize;
-
-        if (edges.count(pageId) > 0) {
-            for (auto const &link : edges[pageId].links) {
-                newRank += alpha * pageHashMap[link].getLinkValue(iteration);
-            }
-        }
-
-        PageRank rankDifference = pageInfo.setCurrentRank(iteration, newRank);
-        dangleSumChange += rankDifference * pageInfo.isDangling;
-        pageRankCumulativeChange += std::abs(rankDifference);
-    }
-
-    return std::make_pair(pageRankCumulativeChange, dangleSumChange);
-}
-
-template<typename P>
-std::pair<double, double>
-updateRanks_concurrent(std::unordered_map<PageId, P, PageIdHash> &pageHashMap,
-                       std::unordered_map<PageId, EdgeInfo, PageIdHash> &edges,
-                       size_t networkSize, double dangleSum, double alpha, uint32_t iteration,
-                       uint32_t numThreads) {
-
-    std::mutex mutex;
-    auto pageMapIter = pageHashMap.begin();
-
-    //std::atomic<uint32_t> waitedTime(0); // todo RT
-
-    auto func = [&pageHashMap, &edges, networkSize, dangleSum, alpha, iteration, &mutex, &pageMapIter/*, &waitedTime*/] {
-        double dangleSumChange = 0;
-        double pageRankCumulativeChange = 0;
-        decltype(pageMapIter) fetchedIter;
-
-        //Timer waitTimer; // todo RT
-        double time = 0;
-
-        while (true) {
-            {
-//                waitTimer.start();
-                std::lock_guard<std::mutex> lck(mutex);
-//                waitTimer.stop();
-//                time += waitTimer.elapsedNanoseconds();
-
-                fetchedIter = pageMapIter;
-                if (pageMapIter != pageHashMap.end())
-                    pageMapIter++;
-                else
-                    break;
-            }
-
-            auto &pageMapElem = *fetchedIter;
-            PageId const &pageId = pageMapElem.first;
-            P &pageInfo = pageMapElem.second;
-
-            double danglingWeight = 1.0 / networkSize;
-            PageRank newRank = dangleSum * alpha * danglingWeight + (1.0 - alpha) / networkSize;
-
-            if (edges.count(pageId) > 0) {
-                for (auto const &link : edges[pageId].links) {
-                    newRank += alpha * pageHashMap[link].getLinkValue(iteration);
-                }
-            }
-
-            PageRank rankDifference = pageInfo.setCurrentRank(iteration, newRank);
-            dangleSumChange += rankDifference * pageInfo.isDangling;
-            pageRankCumulativeChange += std::abs(rankDifference);
-        }
-
-
-        //waitedTime += time;
-        return std::make_pair(pageRankCumulativeChange, dangleSumChange);
-    };
-
-    std::vector<std::future<std::pair<double, double>>> futures;
-    for (uint32_t i = 0; i < numThreads; i++) {
-        futures.push_back(std::async(func));
-    }
-
-    double pageRankCumulativeChange = 0, dangleSumChange = 0;
-    for (auto &fut : futures) {
-        auto const &changes = fut.get();
-        pageRankCumulativeChange += changes.first;
-        dangleSumChange += changes.second;
-    }
-
-    //std::cerr << "threads spent " << waitedTime.load() / networkSize / numThreads << "ns waiting per page per thread" << "\n";
-
-
-    return std::make_pair(pageRankCumulativeChange, dangleSumChange);
-}
-
-template<typename P>
-std::pair<double, double>
-updateRanks_concurrent_hybrid(std::unordered_map<PageId, P, PageIdHash> &pageHashMap,
-                              std::unordered_map<PageId, EdgeInfo, PageIdHash> &edges,
-                              size_t networkSize, double dangleSum, double alpha,
-                              uint32_t iteration,
-                              uint32_t numThreads) {
-
-    using MapIter = decltype(pageHashMap.begin());
-    std::vector<AtomicIterator<MapIter>> threadsIters;
-
-    for (uint32_t i = 0; i < numThreads; i++) {
-        AtomicIterator<MapIter> iter(pageHashMap.begin(), pageHashMap.end());
-        iter.fetch_advance(i); // i-th thread's iter starts at i-th pos
-        threadsIters.push_back(std::move(iter));
-    }
-
-    auto func = [&pageHashMap, &edges, networkSize, dangleSum, alpha, iteration, &threadsIters, numThreads](size_t id) {
-        double dangleSumChange = 0;
-        double pageRankCumulativeChange = 0;
-
-        for (uint32_t offset = 0; offset < numThreads; offset++) {
-            uint32_t threadJobId = (id + offset) % numThreads;
-
-            MapIter fetchedIter;
-            while ((fetchedIter = threadsIters[threadJobId].fetch_advance(numThreads)) != pageHashMap.end()) {
-                auto &pageMapElem = *fetchedIter;
-                PageId const &pageId = pageMapElem.first;
-                P &pageInfo = pageMapElem.second;
-
-                double danglingWeight = 1.0 / networkSize;
-                PageRank newRank = dangleSum * alpha * danglingWeight + (1.0 - alpha) / networkSize;
-
-                if (edges.count(pageId) > 0) {
-                    for (auto const &link : edges[pageId].links) {
-                        newRank += alpha * pageHashMap[link].getLinkValue(iteration);
-                    }
-                }
-
-                PageRank rankDifference = pageInfo.setCurrentRank(iteration, newRank);
-                dangleSumChange += rankDifference * pageInfo.isDangling;
-                pageRankCumulativeChange += std::abs(rankDifference);
-            }
-        }
-
-        return std::make_pair(pageRankCumulativeChange, dangleSumChange);
-    };
-
-    std::vector<std::future<std::pair<double, double>>> futures;
-    for (uint32_t i = 0; i < numThreads; i++) {
-        futures.push_back(std::async(func, i));
-    }
-
-    double pageRankCumulativeChange = 0, dangleSumChange = 0;
-    for (auto &fut : futures) {
-        auto const &changes = fut.get();
-        pageRankCumulativeChange += changes.first;
-        dangleSumChange += changes.second;
-    }
-
-    return std::make_pair(pageRankCumulativeChange, dangleSumChange);
-}
 
 class MultiThreadedPageRankComputer : public PageRankComputer {
 public:
-    MultiThreadedPageRankComputer(uint32_t numThreadsArg)
-            : numThreads(numThreadsArg) {};
+    MultiThreadedPageRankComputer(uint32_t numThreadsArg) : numThreads(numThreadsArg) {};
 
     std::vector<PageIdAndRank>
     computeForNetwork(Network const &network, double alpha,
                       uint32_t iterations, double tolerance) const {
 
-        // todo write cleaner code
-        generatePageIds_concurrent(network, numThreads);
+        Pool pool(numThreads);
+        generatePageIds(pool, network);
 
-        std::unordered_map<PageId, PageInfo, PageIdHash> pageHashMap;
-        std::unordered_map<PageId, EdgeInfo, PageIdHash> edges;
+        PageMap pageHashMap;
+        EdgeMap edges;
+
+        pool.join(); // generatePageIds()
+        initEdges(pool, network, edges);
 
         size_t danglingCount = 0;
-        const PageRank initialRank = 1.0 / network.getSize();
-
-        // no point in multithreading, as only 1 thread at a time can write to hash map
-        // todo But this can be done by main thread while executing edges creation??
-        for (auto const &page : network.getPages()) {
-            size_t linksNum = page.getLinks().size();
-            bool isDangling = (linksNum == 0);
-            danglingCount += isDangling;
-            pageHashMap[page.getId()] = PageInfo(initialRank, linksNum, isDangling);
-        }
-
-        switch(0) {
-            case 0:
-                measure_time([&network, &edges, this]{initEdges_concurrent(network, edges, numThreads);}, "queued");
-                break;
-            case 1:
-                measure_time([&network, &edges, this]{initEdges_concurrent_hybrid(network, edges, numThreads);}, "hybrid");
-                break;
-        }
-
+        PageRank initialRank = 1.0 / network.getSize();
+        initPages(network, pageHashMap, initialRank, danglingCount);
         double dangleSum = initialRank * danglingCount;
 
-        for (uint32_t iteration = 0; iteration < iterations; ++iteration) {
-            //            double prevDangleSum = dangleSum;
-            //            double difference = 0;
-            //
-            //            for (auto &pageMapElem : pageHashMap) {
-            //                PageId pageId = pageMapElem.first;
-            //                PageInfo &pageInfo = pageMapElem.second;
-            //
-            //                double danglingWeight = 1.0 / network.getSize();
-            //                PageRank newRank =
-            //                        prevDangleSum * alpha * danglingWeight + (1.0 - alpha) / network.getSize();
-            //
-            //                if (edges.count(pageId) > 0) {
-            //                    for (auto const &link : edges[pageId].links) {
-            //                        newRank += alpha * pageHashMap[link].getLinkValue(iteration);
-            //                    }
-            //                }
-            //
-            //                PageRank rankDifference = pageInfo.setCurrentRank(iteration, newRank);
-            //                dangleSum += rankDifference * pageInfo.isDangling;
-            //
-            //                difference += std::abs(rankDifference);
-            //            }
+        pool.join(); // initEdges()
 
-            std::pair<double, double> changes;
-            switch (2) {
-                case 0:
-                    changes = updateRanks_sequential(pageHashMap, edges, network.getSize(),
-                                                     dangleSum, alpha, iteration);
-                    break;
-                case 1:
-                    changes = updateRanks_concurrent(pageHashMap, edges, network.getSize(),
-                                                     dangleSum, alpha, iteration, numThreads);
-                    break;
-                case 2:
-                    changes = updateRanks_concurrent_hybrid(pageHashMap, edges, network.getSize(),
-                                                     dangleSum, alpha, iteration, numThreads);
-                    break;
-            }
+        for (uint32_t iteration = 0; iteration < iterations; ++iteration) {
+            auto changes = updateRanks(pool, pageHashMap, edges,
+                                       network.getSize(), dangleSum, alpha, iteration);
 
             auto difference = changes.first;
             auto dangleSumChange = changes.second;
             dangleSum += dangleSumChange;
 
             if (difference < tolerance) {
-                std::vector<PageIdAndRank> result;
-                for (auto iter : pageHashMap) {
-                    result.push_back(
-                            PageIdAndRank(iter.first, iter.second.getCurrentRank(iteration)));
-                }
-
-                ASSERT(result.size() == network.getSize(),
-                       "Invalid changes size=" << result.size() << ", for network"
-                                               << network);
-
-                return result;
+                return generateResult(pageHashMap, network, iteration);
             }
         }
 
@@ -506,6 +130,36 @@ public:
 
 private:
     uint32_t numThreads;
+
+    struct Pool {
+        Pool(uint32_t numThreads) : numThreads(numThreads) {};
+
+        // [func]'s argument must be threadId.
+        template<typename F>
+        void execute_void(F func) {
+            threads.clear();
+
+            for (uint32_t i = 0; i < numThreads; i++)
+                threads.emplace_back(func, i);
+        }
+
+        void join() {
+            for (auto &thread : threads) thread.join();
+        }
+
+        template<typename R, typename F>
+        std::vector<std::future<R>> execute_returning(F func) {
+            std::vector<std::future<R>> futures;
+
+            for (uint32_t i = 0; i < numThreads; i++)
+                futures.push_back(std::async(func, i));
+
+            return futures;
+        }
+
+        uint32_t numThreads;
+        std::vector<std::thread> threads;
+    };
 
     struct PageInfo {
         // using struct should optimize caching and omit use of multiple maps
@@ -532,6 +186,179 @@ private:
         size_t numLinks; // todo original impl has uint32_t, why?
         bool isDangling;
     };
+
+    struct EdgeInfo {
+        std::vector<PageId> links;
+        std::mutex mutex;
+
+        void push_back(PageId elem) {
+            std::lock_guard<std::mutex> lck(mutex);
+            links.push_back(elem);
+        }
+    };
+
+    template<typename I>
+    struct AtomicIterator {
+        AtomicIterator(I start, I end) : mutex(), current(start), end(end) {};
+
+        AtomicIterator(const AtomicIterator<I> &other)
+                : mutex(), current(other.current), end(other.end) {};
+
+        AtomicIterator(const AtomicIterator<I> &&other) : mutex(),
+                                                          current(std::move(other.current)),
+                                                          end(std::move(other.end)) {};
+
+        I fetch_advance(size_t dist) {
+            std::lock_guard<std::mutex> lck(mutex);
+
+            I fetched = current;
+
+            for (size_t i = 0; i < dist && current != end; i++)
+                current++;
+
+            return fetched;
+        };
+
+        std::mutex mutex;
+        I current;
+        I end;
+    };
+
+    using PageMap = std::unordered_map<PageId, PageInfo, PageIdHash>;
+    using EdgeMap = std::unordered_map<PageId, EdgeInfo, PageIdHash>;
+
+    static void generatePageIds(Pool &pool, Network const &network) {
+        std::atomic<size_t> index(0);
+
+        auto func = [&network, &index]([[maybe_unused]] uint32_t threadId) {
+            auto &pages = network.getPages();
+            auto &generator = network.getGenerator();
+            size_t fetched;
+
+            while ((fetched = index.fetch_add(1)) < pages.size()) {
+                pages[fetched].generateId(generator);
+            }
+        };
+
+        pool.execute_void(func);
+    }
+
+    static void initPages(Network const &network, PageMap &pageHashMap,
+                          PageRank initialRank, size_t &danglingCount) {
+
+        danglingCount = 0;
+
+        // no point in multithreading, as only 1 thread at a time can write to hash map
+        // todo But this can be done by main thread while executing edges creation??
+        for (auto const &page : network.getPages()) {
+            size_t linksNum = page.getLinks().size();
+            bool isDangling = (linksNum == 0);
+            danglingCount += isDangling;
+            pageHashMap[page.getId()] = PageInfo(initialRank, linksNum, isDangling);
+        }
+    }
+
+    static void initEdges(Pool &pool, Network const &network, EdgeMap &edges) {
+
+        for (auto const &page : network.getPages()) {
+            for (auto const &link : page.getLinks()) {
+                edges[link];
+            }
+        }
+
+        std::atomic<size_t> pageIndex(0);
+
+        auto func = [&network, &edges, &pageIndex]([[maybe_unused]] uint32_t threadId) {
+            auto const &pages = network.getPages();
+
+            size_t fetchedPageIndex;
+            while ((fetchedPageIndex = pageIndex.fetch_add(1)) < pages.size()) {
+                auto const &page = pages[fetchedPageIndex];
+
+                for (auto const &link : page.getLinks()) {
+                    edges[link].push_back(page.getId());
+                }
+            }
+        };
+
+        pool.execute_void(func);
+    }
+
+
+    static std::pair<double, double>
+    updateRanks(Pool &pool, PageMap &pageHashMap, EdgeMap &edges,
+                size_t networkSize, double dangleSum, double alpha, uint32_t iteration) {
+
+        using MapIter = decltype(pageHashMap.begin());
+        std::vector<AtomicIterator<MapIter>> threadsIters;
+
+        auto numThreads = pool.numThreads;
+
+        for (uint32_t i = 0; i < numThreads; i++) {
+            AtomicIterator<MapIter> iter(pageHashMap.begin(), pageHashMap.end());
+            iter.fetch_advance(i); // i-th thread's iter starts at i-th pos
+            threadsIters.push_back(std::move(iter));
+        }
+
+        auto func = [&pageHashMap, &edges, networkSize, dangleSum, alpha, iteration, &threadsIters, numThreads](
+                uint32_t threadId) {
+            double dangleSumChange = 0;
+            double pageRankCumulativeChange = 0;
+
+            for (uint32_t offset = 0; offset < numThreads; offset++) {
+                uint32_t threadJobId = (threadId + offset) % numThreads;
+
+                MapIter fetchedIter;
+                while ((fetchedIter = threadsIters[threadJobId].fetch_advance(numThreads)) !=
+                       pageHashMap.end()) {
+                    auto &pageMapElem = *fetchedIter;
+                    PageId const &pageId = pageMapElem.first;
+                    PageInfo &pageInfo = pageMapElem.second;
+
+                    double danglingWeight = 1.0 / networkSize;
+                    PageRank newRank =
+                            dangleSum * alpha * danglingWeight + (1.0 - alpha) / networkSize;
+
+                    if (edges.count(pageId) > 0) {
+                        for (auto const &link : edges[pageId].links) {
+                            newRank += alpha * pageHashMap[link].getLinkValue(iteration);
+                        }
+                    }
+
+                    PageRank rankDifference = pageInfo.setCurrentRank(iteration, newRank);
+                    dangleSumChange += rankDifference * pageInfo.isDangling;
+                    pageRankCumulativeChange += std::abs(rankDifference);
+                }
+            }
+
+            return std::make_pair(pageRankCumulativeChange, dangleSumChange);
+        };
+
+        double pageRankCumulativeChange = 0;
+        double dangleSumChange = 0;
+
+        for (auto &fut : pool.execute_returning<std::pair<double, double>>(func)) {
+            auto changes = fut.get();
+            pageRankCumulativeChange += changes.first;
+            dangleSumChange += changes.second;
+        }
+
+        return std::make_pair(pageRankCumulativeChange, dangleSumChange);
+    }
+
+    static std::vector<PageIdAndRank>
+    generateResult(PageMap const &pageHashMap, Network const &network, uint32_t iteration) {
+        std::vector<PageIdAndRank> result;
+
+        for (auto iter : pageHashMap) {
+            result.push_back(PageIdAndRank(iter.first, iter.second.getCurrentRank(iteration)));
+        }
+
+        ASSERT(result.size() == network.getSize(),
+               "Invalid changes size=" << result.size() << ", for network" << network);
+
+        return result;
+    }
 };
 
 #endif /* SRC_MULTITHREADEDPAGERANKCOMPUTER_HPP_ */

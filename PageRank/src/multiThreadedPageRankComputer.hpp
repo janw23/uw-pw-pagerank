@@ -13,8 +13,8 @@
 #include "immutable/pageIdAndRank.hpp"
 #include "immutable/pageRankComputer.hpp"
 
-#include <iostream> // todo RT
 #include <future> // todo RT???
+#include <iostream> // todo RT
 
 // NOTATKI:
 // https://en.cppreference.com/w/cpp/container#Thread_safety
@@ -181,8 +181,7 @@ updateRanks_sequential(std::unordered_map<PageId, P, PageIdHash> &pageHashMap,
         P &pageInfo = pageMapElem.second;
 
         double danglingWeight = 1.0 / networkSize;
-        PageRank newRank =
-                dangleSum * alpha * danglingWeight + (1.0 - alpha) / networkSize;
+        PageRank newRank = dangleSum * alpha * danglingWeight + (1.0 - alpha) / networkSize;
 
         if (edges.count(pageId) > 0) {
             for (auto const &link : edges[pageId].links) {
@@ -208,18 +207,28 @@ updateRanks_concurrent(std::unordered_map<PageId, P, PageIdHash> &pageHashMap,
     std::mutex mutex;
     auto pageMapIter = pageHashMap.begin();
 
-    auto func = [&pageHashMap, &edges, networkSize, dangleSum, alpha, iteration, &mutex, &pageMapIter] {
+    //std::atomic<uint32_t> waitedTime(0); // todo RT
 
+    auto func = [&pageHashMap, &edges, networkSize, dangleSum, alpha, iteration, &mutex, &pageMapIter/*, &waitedTime*/] {
         double dangleSumChange = 0;
         double pageRankCumulativeChange = 0;
         decltype(pageMapIter) fetchedIter;
 
+        //Timer waitTimer; // todo RT
+        double time = 0;
+
         while (true) {
             {
+//                waitTimer.start();
                 std::lock_guard<std::mutex> lck(mutex);
+//                waitTimer.stop();
+//                time += waitTimer.elapsedNanoseconds();
+
                 fetchedIter = pageMapIter;
-                if (pageMapIter != pageHashMap.end()) pageMapIter++;
-                else break;
+                if (pageMapIter != pageHashMap.end())
+                    pageMapIter++;
+                else
+                    break;
             }
 
             auto &pageMapElem = *fetchedIter;
@@ -227,8 +236,7 @@ updateRanks_concurrent(std::unordered_map<PageId, P, PageIdHash> &pageHashMap,
             P &pageInfo = pageMapElem.second;
 
             double danglingWeight = 1.0 / networkSize;
-            PageRank newRank =
-                    dangleSum * alpha * danglingWeight + (1.0 - alpha) / networkSize;
+            PageRank newRank = dangleSum * alpha * danglingWeight + (1.0 - alpha) / networkSize;
 
             if (edges.count(pageId) > 0) {
                 for (auto const &link : edges[pageId].links) {
@@ -241,12 +249,103 @@ updateRanks_concurrent(std::unordered_map<PageId, P, PageIdHash> &pageHashMap,
             pageRankCumulativeChange += std::abs(rankDifference);
         }
 
+
+        //waitedTime += time;
         return std::make_pair(pageRankCumulativeChange, dangleSumChange);
     };
 
     std::vector<std::future<std::pair<double, double>>> futures;
     for (uint32_t i = 0; i < numThreads; i++) {
         futures.push_back(std::async(func));
+    }
+
+    double pageRankCumulativeChange = 0, dangleSumChange = 0;
+    for (auto &fut : futures) {
+        auto const &changes = fut.get();
+        pageRankCumulativeChange += changes.first;
+        dangleSumChange += changes.second;
+    }
+
+    //std::cerr << "threads spent " << waitedTime.load() / networkSize / numThreads << "ns waiting per page per thread" << "\n";
+
+
+    return std::make_pair(pageRankCumulativeChange, dangleSumChange);
+}
+
+template<typename I>
+struct AtomicIterator {
+    AtomicIterator(I start, I end) : mutex(), current(start), end(end) {};
+    AtomicIterator(const AtomicIterator<I>& other) : mutex(), current(other.current), end(other.end) {};
+    AtomicIterator(const AtomicIterator<I>&& other) : mutex(),
+    current(std::move(other.current)), end(std::move(other.end)) {};
+
+    I fetch_advance(size_t dist) {
+        std::lock_guard<std::mutex> lck(mutex);
+
+        I fetched = current;
+
+        for (size_t i = 0; i < dist && current != end; i++)
+            current++;
+
+        return fetched;
+    };
+
+    std::mutex mutex;
+    I current;
+    I end;
+};
+
+template<typename P>
+std::pair<double, double>
+updateRanks_concurrent_hybrid(std::unordered_map<PageId, P, PageIdHash> &pageHashMap,
+                              std::unordered_map<PageId, EdgeInfo, PageIdHash> &edges,
+                              size_t networkSize, double dangleSum, double alpha,
+                              uint32_t iteration,
+                              uint32_t numThreads) {
+
+    using MapIter = decltype(pageHashMap.begin());
+    std::vector<AtomicIterator<MapIter>> threadsIters;
+
+    for (uint32_t i = 0; i < numThreads; i++) {
+        AtomicIterator<MapIter> iter(pageHashMap.begin(), pageHashMap.end());
+        iter.fetch_advance(i); // i-th thread's iter starts at i-th pos
+        threadsIters.push_back(std::move(iter));
+    }
+
+    auto func = [&pageHashMap, &edges, networkSize, dangleSum, alpha, iteration, &threadsIters, numThreads](size_t id) {
+        double dangleSumChange = 0;
+        double pageRankCumulativeChange = 0;
+
+        for (uint32_t offset = 0; offset < numThreads; offset++) {
+            uint32_t threadJobId = (id + offset) % numThreads;
+
+            MapIter fetchedIter;
+            while ((fetchedIter = threadsIters[threadJobId].fetch_advance(numThreads)) != pageHashMap.end()) {
+                auto &pageMapElem = *fetchedIter;
+                PageId const &pageId = pageMapElem.first;
+                P &pageInfo = pageMapElem.second;
+
+                double danglingWeight = 1.0 / networkSize;
+                PageRank newRank = dangleSum * alpha * danglingWeight + (1.0 - alpha) / networkSize;
+
+                if (edges.count(pageId) > 0) {
+                    for (auto const &link : edges[pageId].links) {
+                        newRank += alpha * pageHashMap[link].getLinkValue(iteration);
+                    }
+                }
+
+                PageRank rankDifference = pageInfo.setCurrentRank(iteration, newRank);
+                dangleSumChange += rankDifference * pageInfo.isDangling;
+                pageRankCumulativeChange += std::abs(rankDifference);
+            }
+        }
+
+        return std::make_pair(pageRankCumulativeChange, dangleSumChange);
+    };
+
+    std::vector<std::future<std::pair<double, double>>> futures;
+    for (uint32_t i = 0; i < numThreads; i++) {
+        futures.push_back(std::async(func, i));
     }
 
     double pageRankCumulativeChange = 0, dangleSumChange = 0;
@@ -291,37 +390,41 @@ public:
         double dangleSum = initialRank * danglingCount;
 
         for (uint32_t iteration = 0; iteration < iterations; ++iteration) {
-//            double prevDangleSum = dangleSum;
-//            double difference = 0;
-//
-//            for (auto &pageMapElem : pageHashMap) {
-//                PageId pageId = pageMapElem.first;
-//                PageInfo &pageInfo = pageMapElem.second;
-//
-//                double danglingWeight = 1.0 / network.getSize();
-//                PageRank newRank =
-//                        prevDangleSum * alpha * danglingWeight + (1.0 - alpha) / network.getSize();
-//
-//                if (edges.count(pageId) > 0) {
-//                    for (auto const &link : edges[pageId].links) {
-//                        newRank += alpha * pageHashMap[link].getLinkValue(iteration);
-//                    }
-//                }
-//
-//                PageRank rankDifference = pageInfo.setCurrentRank(iteration, newRank);
-//                dangleSum += rankDifference * pageInfo.isDangling;
-//
-//                difference += std::abs(rankDifference);
-//            }
+            //            double prevDangleSum = dangleSum;
+            //            double difference = 0;
+            //
+            //            for (auto &pageMapElem : pageHashMap) {
+            //                PageId pageId = pageMapElem.first;
+            //                PageInfo &pageInfo = pageMapElem.second;
+            //
+            //                double danglingWeight = 1.0 / network.getSize();
+            //                PageRank newRank =
+            //                        prevDangleSum * alpha * danglingWeight + (1.0 - alpha) / network.getSize();
+            //
+            //                if (edges.count(pageId) > 0) {
+            //                    for (auto const &link : edges[pageId].links) {
+            //                        newRank += alpha * pageHashMap[link].getLinkValue(iteration);
+            //                    }
+            //                }
+            //
+            //                PageRank rankDifference = pageInfo.setCurrentRank(iteration, newRank);
+            //                dangleSum += rankDifference * pageInfo.isDangling;
+            //
+            //                difference += std::abs(rankDifference);
+            //            }
 
             std::pair<double, double> changes;
-            switch (1) {
+            switch (2) {
                 case 0:
                     changes = updateRanks_sequential(pageHashMap, edges, network.getSize(),
                                                      dangleSum, alpha, iteration);
                     break;
                 case 1:
                     changes = updateRanks_concurrent(pageHashMap, edges, network.getSize(),
+                                                     dangleSum, alpha, iteration, numThreads);
+                    break;
+                case 2:
+                    changes = updateRanks_concurrent_hybrid(pageHashMap, edges, network.getSize(),
                                                      dangleSum, alpha, iteration, numThreads);
                     break;
             }

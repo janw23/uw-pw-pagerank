@@ -11,19 +11,26 @@ class Sha256IdGenerator : public IdGenerator {
 public:
     virtual PageId generateId(std::string const& content) const
     {
-        // todo maybe command can be created more efficiently?
         std::string command;
         command.reserve(content.size() + 30);
         command.append("printf \"").append(content).append("\" | sha256sum");
 
         auto pd = popen(command.data(), "r");
+        if (pd == nullptr) {
+            throw std::runtime_error("popen failed");
+        }
 
         const uint hash_length = 64; // sha256 hash has fixed character length
-        char buffer[hash_length + 1]; // todo Is it okay? Maybe put it as class member
-        buffer[hash_length] = '\0';
+        char buffer[hash_length + 1];
 
-        fgets(buffer, hash_length + 1, pd); // todo Why does it need to be hashlength + 1?
-        pclose(pd);
+        if (fgets(buffer, hash_length + 1, pd) == nullptr) { // +1 for terminating character
+            pclose(pd);
+            throw std::runtime_error("fgets failed");
+        }
+
+        if (pclose(pd) == -1) {
+            throw std::runtime_error("pclose failed");
+        }
 
         return std::string(buffer);
     }

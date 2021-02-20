@@ -32,7 +32,7 @@ public:
 
         for (uint32_t iteration = 0; iteration < iterations; ++iteration) {
             auto changes = updateRanks(pageHashMap, edges,
-                                       network.getSize(), dangleSum, alpha, iteration);
+                network.getSize(), dangleSum, alpha, iteration);
 
             auto difference = changes.first;
             dangleSum += changes.second;
@@ -83,14 +83,16 @@ private:
     using PageMap = std::unordered_map<PageId, PageInfo, PageIdHash>;
     using EdgeMap = std::unordered_map<PageId, std::vector<PageId>, PageIdHash>;
 
-    static void generatePageIds(Network const& network) {
+    static void generatePageIds(Network const& network)
+    {
         for (auto const& page : network.getPages()) {
             page.generateId(network.getGenerator());
         }
     }
 
     static void initPages(Network const& network, PageMap& pageHashMap,
-                          PageRank initialRank, size_t& danglingCount) {
+        PageRank initialRank, size_t& danglingCount)
+    {
         danglingCount = 0;
 
         for (auto const& page : network.getPages()) {
@@ -101,7 +103,8 @@ private:
         }
     }
 
-    static void initEdges(Network const& network, EdgeMap &edges) {
+    static void initEdges(Network const& network, EdgeMap& edges)
+    {
         for (auto const& page : network.getPages()) {
             for (auto const& link : page.getLinks()) {
                 edges[link].push_back(page.getId());
@@ -111,7 +114,8 @@ private:
 
     static std::pair<double, double>
     updateRanks(PageMap& pageHashMap, EdgeMap& edges,
-                size_t networkSize, const double dangleSum, const double alpha, const uint32_t iteration){
+        size_t networkSize, const double dangleSum, const double alpha, const uint32_t iteration)
+    {
 
         double dangleSumChange = 0;
         double pageRankCumulativeChange = 0;
@@ -134,7 +138,7 @@ private:
             pageRankCumulativeChange += std::abs(rankDifference);
         }
 
-        return {pageRankCumulativeChange, dangleSumChange};
+        return { pageRankCumulativeChange, dangleSumChange };
     }
 
     static std::vector<PageIdAndRank>
@@ -147,7 +151,7 @@ private:
         }
 
         ASSERT(result.size() == network.getSize(),
-               "Invalid changes size=" << result.size() << ", for network" << network);
+            "Invalid changes size=" << result.size() << ", for network" << network);
 
         return result;
     }

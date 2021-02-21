@@ -1,0 +1,2248 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="550" onload="init(evt)" viewBox="0 0 1200 550" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+	}
+
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom();
+			zoom(target);
+		}
+		else if (e.target.id == "unzoom") unzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+	}, false)
+
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+		return;
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		// Fit in full text width
+		if (/^ *$/.test(txt) || t.getSubStringLength(0, txt.length) < w)
+			return;
+
+		for (var x = txt.length - 2; x > 0; x--) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom() {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			update_text(el[i]);
+		}
+		search();
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) {
+				currentSearchTerm = term;
+				search();
+			}
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (currentSearchTerm === null) return;
+		var term = currentSearchTerm;
+
+		var re = new RegExp(term, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="550.0" fill="url(#background)"  />
+<text id="title" x="600.00" y="24" >Flame Graph</text>
+<text id="details" x="10.00" y="533" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="533" > </text>
+<g id="frames">
+<g >
+<title>std::mutex::lock (1 samples, 0.63%)</title><rect x="440.4" y="101" width="7.5" height="15.0" fill="rgb(210,185,13)" rx="2" ry="2" />
+<text  x="443.44" y="111.5" ></text>
+</g>
+<g >
+<title>std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::generatePageIds(MultiThreadedPageRankComputer::Pool&amp;, (16 samples, 10.06%)</title><rect x="10.0" y="405" width="118.7" height="15.0" fill="rgb(210,75,10)" rx="2" ry="2" />
+<text  x="13.00" y="415.5" >std::thread::_..</text>
+</g>
+<g >
+<title>operatornew(unsigned (1 samples, 0.63%)</title><rect x="61.9" y="229" width="7.5" height="15.0" fill="rgb(213,56,21)" rx="2" ry="2" />
+<text  x="64.95" y="239.5" ></text>
+</g>
+<g >
+<title>std::__invoke_impl&lt;std::pair&lt;double, (14 samples, 8.81%)</title><rect x="648.2" y="165" width="103.9" height="15.0" fill="rgb(229,207,28)" rx="2" ry="2" />
+<text  x="651.24" y="175.5" >std::__invok..</text>
+</g>
+<g >
+<title>std::__future_base::_State_baseV2::_M_do_set(std::function&lt;std::unique_ptr&lt;std::__future_base::_Result_base, (14 samples, 8.81%)</title><rect x="544.3" y="277" width="103.9" height="15.0" fill="rgb(233,80,54)" rx="2" ry="2" />
+<text  x="547.34" y="287.5" >std::__futur..</text>
+</g>
+<g >
+<title>std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 8.81%)</title><rect x="856.0" y="197" width="103.9" height="15.0" fill="rgb(237,203,26)" rx="2" ry="2" />
+<text  x="859.04" y="207.5" >std::thread:..</text>
+</g>
+<g >
+<title>__pthread_once_slow(once_control=0x55bdc58e9838, (14 samples, 8.81%)</title><rect x="232.6" y="293" width="103.9" height="15.0" fill="rgb(246,178,13)" rx="2" ry="2" />
+<text  x="235.64" y="303.5" >__pthread_on..</text>
+</g>
+<g >
+<title>std::operator+&lt;char, (1 samples, 0.63%)</title><rect x="121.3" y="309" width="7.4" height="15.0" fill="rgb(240,82,31)" rx="2" ry="2" />
+<text  x="124.32" y="319.5" ></text>
+</g>
+<g >
+<title>std::lock_guard&lt;std::mutex&gt;::lock_guard (1 samples, 0.63%)</title><rect x="336.5" y="117" width="7.5" height="15.0" fill="rgb(240,142,1)" rx="2" ry="2" />
+<text  x="339.54" y="127.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::AtomicIterator&lt;std::__detail::_Node_iterator&lt;std::pair&lt;PageId (4 samples, 2.52%)</title><rect x="648.2" y="133" width="29.7" height="15.0" fill="rgb(235,14,12)" rx="2" ry="2" />
+<text  x="651.24" y="143.5" >Mu..</text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::AtomicIterator&lt;std::__detail::_Node_iterator&lt;std::pair&lt;PageIdconst, (8 samples, 5.03%)</title><rect x="677.9" y="133" width="59.4" height="15.0" fill="rgb(240,44,50)" rx="2" ry="2" />
+<text  x="680.92" y="143.5" >MultiT..</text>
+</g>
+<g >
+<title>__GI___libc_malloc(bytes=65) (1 samples, 0.63%)</title><rect x="76.8" y="213" width="7.4" height="15.0" fill="rgb(254,201,33)" rx="2" ry="2" />
+<text  x="79.79" y="223.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::initPages (7 samples, 4.40%)</title><rect x="997.0" y="437" width="52.0" height="15.0" fill="rgb(222,176,50)" rx="2" ry="2" />
+<text  x="1000.04" y="447.5" >Multi..</text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char,std::char_traits&lt;char&gt;, (1 samples, 0.63%)</title><rect x="121.3" y="245" width="7.4" height="15.0" fill="rgb(243,94,31)" rx="2" ry="2" />
+<text  x="124.32" y="255.5" ></text>
+</g>
+<g >
+<title>std::__uninitialized_move_if_noexcept_a&lt;PageIdAndRank*, (1 samples, 0.63%)</title><rect x="989.6" y="373" width="7.4" height="15.0" fill="rgb(233,69,43)" rx="2" ry="2" />
+<text  x="992.62" y="383.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="47.1" y="277" width="7.4" height="15.0" fill="rgb(232,79,36)" rx="2" ry="2" />
+<text  x="50.11" y="287.5" ></text>
+</g>
+<g >
+<title>grow_heap(diff=4096, (1 samples, 0.63%)</title><rect x="91.6" y="165" width="7.5" height="15.0" fill="rgb(232,28,13)" rx="2" ry="2" />
+<text  x="94.64" y="175.5" ></text>
+</g>
+<g >
+<title>__pthread_once_slow(once_control=0x55bdc58e98d8, (14 samples, 8.81%)</title><rect x="336.5" y="293" width="103.9" height="15.0" fill="rgb(219,31,31)" rx="2" ry="2" />
+<text  x="339.54" y="303.5" >__pthread_on..</text>
+</g>
+<g >
+<title>std::__invoke&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 8.81%)</title><rect x="336.5" y="181" width="103.9" height="15.0" fill="rgb(241,8,4)" rx="2" ry="2" />
+<text  x="339.54" y="191.5" >std::__invok..</text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 8.81%)</title><rect x="752.1" y="149" width="103.9" height="15.0" fill="rgb(227,202,43)" rx="2" ry="2" />
+<text  x="755.14" y="159.5" >MultiThreade..</text>
+</g>
+<g >
+<title>std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 8.81%)</title><rect x="752.1" y="213" width="103.9" height="15.0" fill="rgb(231,151,17)" rx="2" ry="2" />
+<text  x="755.14" y="223.5" >std::thread:..</text>
+</g>
+<g >
+<title>std::_Hashtable&lt;PageId, (1 samples, 0.63%)</title><rect x="425.6" y="117" width="7.4" height="15.0" fill="rgb(251,140,27)" rx="2" ry="2" />
+<text  x="428.60" y="127.5" ></text>
+</g>
+<g >
+<title>__gthread_mutex_lock(__mutex=0x55bdc58e9610) (1 samples, 0.63%)</title><rect x="336.5" y="85" width="7.5" height="15.0" fill="rgb(222,107,23)" rx="2" ry="2" />
+<text  x="339.54" y="95.5" ></text>
+</g>
+<g >
+<title>std::__detail::_Hashtable_alloc&lt;std::allocator&lt;std::__detail::_Hash_node&lt;std::pair&lt;PageId (1 samples, 0.63%)</title><rect x="1175.2" y="373" width="7.4" height="15.0" fill="rgb(237,65,53)" rx="2" ry="2" />
+<text  x="1178.16" y="383.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="91.6" y="261" width="7.5" height="15.0" fill="rgb(247,59,7)" rx="2" ry="2" />
+<text  x="94.64" y="271.5" ></text>
+</g>
+<g >
+<title>std::__detail::_Map_base&lt;PageId, (1 samples, 0.63%)</title><rect x="433.0" y="117" width="7.4" height="15.0" fill="rgb(236,215,12)" rx="2" ry="2" />
+<text  x="436.02" y="127.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="113.9" y="261" width="7.4" height="15.0" fill="rgb(226,81,37)" rx="2" ry="2" />
+<text  x="116.90" y="271.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="84.2" y="261" width="7.4" height="15.0" fill="rgb(253,196,49)" rx="2" ry="2" />
+<text  x="87.21" y="271.5" ></text>
+</g>
+<g >
+<title>std::function&lt;std::unique_ptr&lt;std::__future_base::_Result_base,std::__future_base::_Result_base::_Deleter&gt; (14 samples, 8.81%)</title><rect x="856.0" y="261" width="103.9" height="15.0" fill="rgb(252,95,46)" rx="2" ry="2" />
+<text  x="859.04" y="271.5" >std::functio..</text>
+</g>
+<g >
+<title>__GI___libc_malloc(bytes=80) (2 samples, 1.26%)</title><rect x="1011.9" y="325" width="14.8" height="15.0" fill="rgb(254,59,25)" rx="2" ry="2" />
+<text  x="1014.89" y="335.5" ></text>
+</g>
+<g >
+<title>std::_Hashtable&lt;PageId, (1 samples, 0.63%)</title><rect x="997.0" y="357" width="7.5" height="15.0" fill="rgb(214,153,39)" rx="2" ry="2" />
+<text  x="1000.04" y="367.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (13 samples, 8.18%)</title><rect x="544.3" y="149" width="96.5" height="15.0" fill="rgb(235,130,28)" rx="2" ry="2" />
+<text  x="547.34" y="159.5" >MultiThread..</text>
+</g>
+<g >
+<title>__pthread_once_slow(once_control=0x55bdc58e9e08, (14 samples, 8.81%)</title><rect x="752.1" y="293" width="103.9" height="15.0" fill="rgb(237,6,18)" rx="2" ry="2" />
+<text  x="755.14" y="303.5" >__pthread_on..</text>
+</g>
+<g >
+<title>std::__detail::_Hash_code_base&lt;PageId, (1 samples, 0.63%)</title><rect x="529.5" y="85" width="7.4" height="15.0" fill="rgb(248,117,30)" rx="2" ry="2" />
+<text  x="532.50" y="95.5" ></text>
+</g>
+<g >
+<title>std::_Hashtable&lt;PageId, (4 samples, 2.52%)</title><rect x="1152.9" y="421" width="29.7" height="15.0" fill="rgb(226,57,23)" rx="2" ry="2" />
+<text  x="1155.89" y="431.5" >st..</text>
+</g>
+<g >
+<title>operatornew(unsigned (1 samples, 0.63%)</title><rect x="47.1" y="229" width="7.4" height="15.0" fill="rgb(244,157,50)" rx="2" ry="2" />
+<text  x="50.11" y="239.5" ></text>
+</g>
+<g >
+<title>__gnu_cxx::new_allocator&lt;Page&gt;::construct&lt;Page, (1 samples, 0.63%)</title><rect x="1182.6" y="389" width="7.4" height="15.0" fill="rgb(212,12,52)" rx="2" ry="2" />
+<text  x="1185.58" y="399.5" ></text>
+</g>
+<g >
+<title>std::operator+&lt;char, (1 samples, 0.63%)</title><rect x="113.9" y="309" width="7.4" height="15.0" fill="rgb(253,103,37)" rx="2" ry="2" />
+<text  x="116.90" y="319.5" ></text>
+</g>
+<g >
+<title>std::__future_base::_Async_state_commonV2::_M_complete_async (7 samples, 4.40%)</title><rect x="1049.0" y="373" width="51.9" height="15.0" fill="rgb(253,166,15)" rx="2" ry="2" />
+<text  x="1051.99" y="383.5" >std::..</text>
+</g>
+<g >
+<title>__pthread_once_slow(once_control=0x55bdc58e9fd8, (14 samples, 8.81%)</title><rect x="856.0" y="293" width="103.9" height="15.0" fill="rgb(231,8,46)" rx="2" ry="2" />
+<text  x="859.04" y="303.5" >__pthread_on..</text>
+</g>
+<g >
+<title>std::vector&lt;PageIdAndRank, (1 samples, 0.63%)</title><rect x="989.6" y="389" width="7.4" height="15.0" fill="rgb(233,80,2)" rx="2" ry="2" />
+<text  x="992.62" y="399.5" ></text>
+</g>
+<g >
+<title>std::__future_base::_State_baseV2::wait(this=0x55bdc58e9df0) (7 samples, 4.40%)</title><rect x="1100.9" y="389" width="52.0" height="15.0" fill="rgb(209,213,7)" rx="2" ry="2" />
+<text  x="1103.94" y="399.5" >std::..</text>
+</g>
+<g >
+<title>std::hash&lt;std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="433.0" y="69" width="7.4" height="15.0" fill="rgb(227,46,50)" rx="2" ry="2" />
+<text  x="436.02" y="79.5" ></text>
+</g>
+<g >
+<title>std::_Hashtable&lt;PageId, (4 samples, 2.52%)</title><rect x="1152.9" y="405" width="29.7" height="15.0" fill="rgb(240,179,17)" rx="2" ry="2" />
+<text  x="1155.89" y="415.5" >st..</text>
+</g>
+<g >
+<title>__gthread_mutex_unlock(__mutex=0x55bdc58e9680) (1 samples, 0.63%)</title><rect x="544.3" y="85" width="7.5" height="15.0" fill="rgb(248,31,24)" rx="2" ry="2" />
+<text  x="547.34" y="95.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="39.7" y="277" width="7.4" height="15.0" fill="rgb(234,135,31)" rx="2" ry="2" />
+<text  x="42.69" y="287.5" ></text>
+</g>
+<g >
+<title>Network::addPage (1 samples, 0.63%)</title><rect x="1182.6" y="437" width="7.4" height="15.0" fill="rgb(208,196,49)" rx="2" ry="2" />
+<text  x="1185.58" y="447.5" ></text>
+</g>
+<g >
+<title>std::__invoke&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 8.81%)</title><rect x="544.3" y="181" width="103.9" height="15.0" fill="rgb(238,197,31)" rx="2" ry="2" />
+<text  x="547.34" y="191.5" >std::__invok..</text>
+</g>
+<g >
+<title>sysmalloc (1 samples, 0.63%)</title><rect x="17.4" y="181" width="7.4" height="15.0" fill="rgb(248,124,37)" rx="2" ry="2" />
+<text  x="20.42" y="191.5" ></text>
+</g>
+<g >
+<title>__gnu_cxx::new_allocator&lt;std::__detail::_Hash_node_base*&gt;::deallocate(this=&lt;synthetic (3 samples, 1.89%)</title><rect x="1152.9" y="341" width="22.3" height="15.0" fill="rgb(220,31,42)" rx="2" ry="2" />
+<text  x="1155.89" y="351.5" >_..</text>
+</g>
+<g >
+<title>std::__invoke&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 8.81%)</title><rect x="648.2" y="181" width="103.9" height="15.0" fill="rgb(239,148,52)" rx="2" ry="2" />
+<text  x="651.24" y="191.5" >std::__invok..</text>
+</g>
+<g >
+<title>__gthread_mutex_unlock(__mutex=0x55bdc58e95a0) (1 samples, 0.63%)</title><rect x="136.2" y="85" width="7.4" height="15.0" fill="rgb(225,154,50)" rx="2" ry="2" />
+<text  x="139.16" y="95.5" ></text>
+</g>
+<g >
+<title>__pthread_mutex_unlock_usercnt(mutex=0x55bdc58e96b8, (1 samples, 0.63%)</title><rect x="240.1" y="69" width="7.4" height="15.0" fill="rgb(209,219,54)" rx="2" ry="2" />
+<text  x="243.06" y="79.5" ></text>
+</g>
+<g >
+<title>__GI___libc_malloc(bytes=65) (1 samples, 0.63%)</title><rect x="121.3" y="213" width="7.4" height="15.0" fill="rgb(245,225,8)" rx="2" ry="2" />
+<text  x="124.32" y="223.5" ></text>
+</g>
+<g >
+<title>SimpleIdGenerator::generateId (1 samples, 0.63%)</title><rect x="61.9" y="325" width="7.5" height="15.0" fill="rgb(215,63,10)" rx="2" ry="2" />
+<text  x="64.95" y="335.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::AtomicIterator&lt;std::__detail::_Node_iterator&lt;std::pair&lt;PageId (1 samples, 0.63%)</title><rect x="440.4" y="133" width="7.5" height="15.0" fill="rgb(216,59,33)" rx="2" ry="2" />
+<text  x="443.44" y="143.5" ></text>
+</g>
+<g >
+<title>std::allocator_traits&lt;std::allocator&lt;Page&gt; (1 samples, 0.63%)</title><rect x="1182.6" y="405" width="7.4" height="15.0" fill="rgb(254,31,39)" rx="2" ry="2" />
+<text  x="1185.58" y="415.5" ></text>
+</g>
+<g >
+<title>sysmalloc (1 samples, 0.63%)</title><rect x="76.8" y="181" width="7.4" height="15.0" fill="rgb(214,24,20)" rx="2" ry="2" />
+<text  x="79.79" y="191.5" ></text>
+</g>
+<g >
+<title>std::thread::_State_impl&lt;std::thread::_Invoker&lt;std::tuple&lt;std::__future_base::_Async_state_impl&lt;std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (112 samples, 70.44%)</title><rect x="128.7" y="437" width="831.2" height="15.0" fill="rgb(227,118,12)" rx="2" ry="2" />
+<text  x="131.74" y="447.5" >std::thread::_State_impl&lt;std::thread::_Invoker&lt;std::tuple&lt;std::__future_base::_Async_state_impl&lt;std::thread::_Invok..</text>
+</g>
+<g >
+<title>std::__invoke_impl&lt;void, (16 samples, 10.06%)</title><rect x="10.0" y="373" width="118.7" height="15.0" fill="rgb(239,47,46)" rx="2" ry="2" />
+<text  x="13.00" y="383.5" >std::__invoke_..</text>
+</g>
+<g >
+<title>std::vector&lt;PageId, (1 samples, 0.63%)</title><rect x="1182.6" y="357" width="7.4" height="15.0" fill="rgb(214,133,45)" rx="2" ry="2" />
+<text  x="1185.58" y="367.5" ></text>
+</g>
+<g >
+<title>__GI___pthread_mutex_lock(mutex=0x55bdc58e96b8) (2 samples, 1.26%)</title><rect x="648.2" y="69" width="14.9" height="15.0" fill="rgb(241,135,20)" rx="2" ry="2" />
+<text  x="651.24" y="79.5" ></text>
+</g>
+<g >
+<title>std::thread::join()() (7 samples, 4.40%)</title><rect x="1049.0" y="293" width="51.9" height="15.0" fill="rgb(206,36,3)" rx="2" ry="2" />
+<text  x="1051.99" y="303.5" >std::..</text>
+</g>
+<g >
+<title>SimpleIdGenerator::generateId (1 samples, 0.63%)</title><rect x="17.4" y="325" width="7.4" height="15.0" fill="rgb(238,21,49)" rx="2" ry="2" />
+<text  x="20.42" y="335.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char,std::char_traits&lt;char&gt;, (1 samples, 0.63%)</title><rect x="47.1" y="245" width="7.4" height="15.0" fill="rgb(230,109,51)" rx="2" ry="2" />
+<text  x="50.11" y="255.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::generateResult (3 samples, 1.89%)</title><rect x="974.8" y="437" width="22.2" height="15.0" fill="rgb(218,4,22)" rx="2" ry="2" />
+<text  x="977.78" y="447.5" >M..</text>
+</g>
+<g >
+<title>_int_malloc(av=av@entry=0x7f8b34000020, (1 samples, 0.63%)</title><rect x="24.8" y="197" width="7.5" height="15.0" fill="rgb(218,94,21)" rx="2" ry="2" />
+<text  x="27.84" y="207.5" ></text>
+</g>
+<g >
+<title>PageIdAndRank::PageIdAndRank (1 samples, 0.63%)</title><rect x="974.8" y="421" width="7.4" height="15.0" fill="rgb(225,197,13)" rx="2" ry="2" />
+<text  x="977.78" y="431.5" ></text>
+</g>
+<g >
+<title>PageIdHash::operator() (1 samples, 0.63%)</title><rect x="433.0" y="85" width="7.4" height="15.0" fill="rgb(206,144,54)" rx="2" ry="2" />
+<text  x="436.02" y="95.5" ></text>
+</g>
+<g >
+<title>Page::generateId(this=0x7f8b3f043990, (1 samples, 0.63%)</title><rect x="69.4" y="341" width="7.4" height="15.0" fill="rgb(234,100,16)" rx="2" ry="2" />
+<text  x="72.37" y="351.5" ></text>
+</g>
+<g >
+<title>std::operator+&lt;char, (1 samples, 0.63%)</title><rect x="54.5" y="309" width="7.4" height="15.0" fill="rgb(207,123,19)" rx="2" ry="2" />
+<text  x="57.53" y="319.5" ></text>
+</g>
+<g >
+<title>NetworkWithoutManyEdgesGenerator::generateNetworkOfSize (1 samples, 0.63%)</title><rect x="1182.6" y="453" width="7.4" height="15.0" fill="rgb(237,189,33)" rx="2" ry="2" />
+<text  x="1185.58" y="463.5" ></text>
+</g>
+<g >
+<title>std::equal_to&lt;PageId&gt;::operator() (1 samples, 0.63%)</title><rect x="1004.5" y="325" width="7.4" height="15.0" fill="rgb(205,107,30)" rx="2" ry="2" />
+<text  x="1007.47" y="335.5" ></text>
+</g>
+<g >
+<title>std::function&lt;std::unique_ptr&lt;std::__future_base::_Result_base,std::__future_base::_Result_base::_Deleter&gt; (14 samples, 8.81%)</title><rect x="336.5" y="261" width="103.9" height="15.0" fill="rgb(238,27,24)" rx="2" ry="2" />
+<text  x="339.54" y="271.5" >std::functio..</text>
+</g>
+<g >
+<title>grow_heap(diff=4096, (1 samples, 0.63%)</title><rect x="69.4" y="165" width="7.4" height="15.0" fill="rgb(239,185,15)" rx="2" ry="2" />
+<text  x="72.37" y="175.5" ></text>
+</g>
+<g >
+<title>std::_Hashtable&lt;PageId, (2 samples, 1.26%)</title><rect x="997.0" y="389" width="14.9" height="15.0" fill="rgb(222,218,39)" rx="2" ry="2" />
+<text  x="1000.04" y="399.5" ></text>
+</g>
+<g >
+<title>std::__detail::_Mod_range_hashing::operator() (1 samples, 0.63%)</title><rect x="997.0" y="325" width="7.5" height="15.0" fill="rgb(242,131,47)" rx="2" ry="2" />
+<text  x="1000.04" y="335.5" ></text>
+</g>
+<g >
+<title>__gthread_mutex_unlock(__mutex=0x55bdc58e96b8) (1 samples, 0.63%)</title><rect x="240.1" y="85" width="7.4" height="15.0" fill="rgb(226,213,42)" rx="2" ry="2" />
+<text  x="243.06" y="95.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char,std::char_traits&lt;char&gt;, (1 samples, 0.63%)</title><rect x="17.4" y="245" width="7.4" height="15.0" fill="rgb(238,201,50)" rx="2" ry="2" />
+<text  x="20.42" y="255.5" ></text>
+</g>
+<g >
+<title>PageId::PageId (1 samples, 0.63%)</title><rect x="974.8" y="405" width="7.4" height="15.0" fill="rgb(205,25,38)" rx="2" ry="2" />
+<text  x="977.78" y="415.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="99.1" y="277" width="7.4" height="15.0" fill="rgb(229,67,51)" rx="2" ry="2" />
+<text  x="102.06" y="287.5" ></text>
+</g>
+<g >
+<title>std::mutex::unlock (1 samples, 0.63%)</title><rect x="240.1" y="101" width="7.4" height="15.0" fill="rgb(245,224,13)" rx="2" ry="2" />
+<text  x="243.06" y="111.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="61.9" y="261" width="7.5" height="15.0" fill="rgb(250,33,21)" rx="2" ry="2" />
+<text  x="64.95" y="271.5" ></text>
+</g>
+<g >
+<title>Page::generateId(this=0x7f8b3f048430, (1 samples, 0.63%)</title><rect x="106.5" y="341" width="7.4" height="15.0" fill="rgb(213,43,3)" rx="2" ry="2" />
+<text  x="109.48" y="351.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="39.7" y="293" width="7.4" height="15.0" fill="rgb(240,56,44)" rx="2" ry="2" />
+<text  x="42.69" y="303.5" ></text>
+</g>
+<g >
+<title>SimpleIdGenerator::generateId (1 samples, 0.63%)</title><rect x="121.3" y="325" width="7.4" height="15.0" fill="rgb(219,82,38)" rx="2" ry="2" />
+<text  x="124.32" y="335.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char,std::char_traits&lt;char&gt;, (1 samples, 0.63%)</title><rect x="61.9" y="245" width="7.5" height="15.0" fill="rgb(241,206,40)" rx="2" ry="2" />
+<text  x="64.95" y="255.5" ></text>
+</g>
+<g >
+<title>std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::generatePageIds(MultiThreadedPageRankComputer::Pool&amp;, (16 samples, 10.06%)</title><rect x="10.0" y="421" width="118.7" height="15.0" fill="rgb(227,123,27)" rx="2" ry="2" />
+<text  x="13.00" y="431.5" >std::thread::_..</text>
+</g>
+<g >
+<title>_int_malloc(av=av@entry=0x7f8b38000020, (1 samples, 0.63%)</title><rect x="99.1" y="197" width="7.4" height="15.0" fill="rgb(228,42,5)" rx="2" ry="2" />
+<text  x="102.06" y="207.5" ></text>
+</g>
+<g >
+<title>SimpleIdGenerator::generateId (1 samples, 0.63%)</title><rect x="99.1" y="325" width="7.4" height="15.0" fill="rgb(242,225,1)" rx="2" ry="2" />
+<text  x="102.06" y="335.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (13 samples, 8.18%)</title><rect x="128.7" y="149" width="96.5" height="15.0" fill="rgb(214,87,45)" rx="2" ry="2" />
+<text  x="131.74" y="159.5" >MultiThread..</text>
+</g>
+<g >
+<title>PageId::~PageId (1 samples, 0.63%)</title><rect x="1175.2" y="309" width="7.4" height="15.0" fill="rgb(228,188,8)" rx="2" ry="2" />
+<text  x="1178.16" y="319.5" ></text>
+</g>
+<g >
+<title>std::call_once&lt;void (7 samples, 4.40%)</title><rect x="1100.9" y="341" width="52.0" height="15.0" fill="rgb(240,120,44)" rx="2" ry="2" />
+<text  x="1103.94" y="351.5" >std::..</text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="54.5" y="261" width="7.4" height="15.0" fill="rgb(242,5,43)" rx="2" ry="2" />
+<text  x="57.53" y="271.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (13 samples, 8.18%)</title><rect x="232.6" y="149" width="96.5" height="15.0" fill="rgb(231,2,45)" rx="2" ry="2" />
+<text  x="235.64" y="159.5" >MultiThread..</text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::AtomicIterator&lt;std::__detail::_Node_iterator&lt;std::pair&lt;PageIdconst, (11 samples, 6.92%)</title><rect x="447.9" y="133" width="81.6" height="15.0" fill="rgb(241,93,51)" rx="2" ry="2" />
+<text  x="450.86" y="143.5" >MultiThre..</text>
+</g>
+<g >
+<title>SimpleIdGenerator::generateId (1 samples, 0.63%)</title><rect x="113.9" y="325" width="7.4" height="15.0" fill="rgb(209,17,37)" rx="2" ry="2" />
+<text  x="116.90" y="335.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;,std::unordered_map&lt;PageId, (1 samples, 0.63%)</title><rect x="329.1" y="149" width="7.4" height="15.0" fill="rgb(250,70,25)" rx="2" ry="2" />
+<text  x="332.12" y="159.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::AtomicIterator&lt;std::__detail::_Node_iterator&lt;std::pair&lt;PageIdconst, (11 samples, 6.92%)</title><rect x="344.0" y="133" width="81.6" height="15.0" fill="rgb(252,192,21)" rx="2" ry="2" />
+<text  x="346.96" y="143.5" >MultiThre..</text>
+</g>
+<g >
+<title>std::unordered_map&lt;PageId, (6 samples, 3.77%)</title><rect x="997.0" y="421" width="44.6" height="15.0" fill="rgb(232,35,0)" rx="2" ry="2" />
+<text  x="1000.04" y="431.5" >std:..</text>
+</g>
+<g >
+<title>sysmalloc (1 samples, 0.63%)</title><rect x="91.6" y="181" width="7.5" height="15.0" fill="rgb(231,88,32)" rx="2" ry="2" />
+<text  x="94.64" y="191.5" ></text>
+</g>
+<g >
+<title>__GI___libc_malloc(bytes=65) (1 samples, 0.63%)</title><rect x="61.9" y="213" width="7.5" height="15.0" fill="rgb(224,85,40)" rx="2" ry="2" />
+<text  x="64.95" y="223.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;PageIdAndRank, (1 samples, 0.63%)</title><rect x="989.6" y="421" width="7.4" height="15.0" fill="rgb(210,203,35)" rx="2" ry="2" />
+<text  x="992.62" y="431.5" ></text>
+</g>
+<g >
+<title>__pthread_mutex_unlock_usercnt(mutex=0x55bdc58e9680, (1 samples, 0.63%)</title><rect x="544.3" y="69" width="7.5" height="15.0" fill="rgb(215,88,51)" rx="2" ry="2" />
+<text  x="547.34" y="79.5" ></text>
+</g>
+<g >
+<title>grow_heap(diff=4096, (1 samples, 0.63%)</title><rect x="54.5" y="165" width="7.4" height="15.0" fill="rgb(205,208,32)" rx="2" ry="2" />
+<text  x="57.53" y="175.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char,std::char_traits&lt;char&gt;, (1 samples, 0.63%)</title><rect x="974.8" y="341" width="7.4" height="15.0" fill="rgb(234,135,12)" rx="2" ry="2" />
+<text  x="977.78" y="351.5" ></text>
+</g>
+<g >
+<title>std::__detail::_Mod_range_hashing::operator()(this=&lt;optimized (1 samples, 0.63%)</title><rect x="1026.7" y="325" width="7.5" height="15.0" fill="rgb(247,229,16)" rx="2" ry="2" />
+<text  x="1029.73" y="335.5" ></text>
+</g>
+<g >
+<title>sysmalloc (1 samples, 0.63%)</title><rect x="47.1" y="181" width="7.4" height="15.0" fill="rgb(215,138,52)" rx="2" ry="2" />
+<text  x="50.11" y="191.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char,std::char_traits&lt;char&gt;, (1 samples, 0.63%)</title><rect x="76.8" y="245" width="7.4" height="15.0" fill="rgb(253,99,45)" rx="2" ry="2" />
+<text  x="79.79" y="255.5" ></text>
+</g>
+<g >
+<title>__pthread_once_slow(once_control=0x55bdc58e9e18, (7 samples, 4.40%)</title><rect x="1100.9" y="309" width="52.0" height="15.0" fill="rgb(232,12,46)" rx="2" ry="2" />
+<text  x="1103.94" y="319.5" >__pth..</text>
+</g>
+<g >
+<title>std::_Hashtable&lt;PageId, (1 samples, 0.63%)</title><rect x="1026.7" y="357" width="7.5" height="15.0" fill="rgb(254,44,35)" rx="2" ry="2" />
+<text  x="1029.73" y="367.5" ></text>
+</g>
+<g >
+<title>_int_malloc(av=av@entry=0x7f8b18000020, (1 samples, 0.63%)</title><rect x="61.9" y="197" width="7.5" height="15.0" fill="rgb(250,13,51)" rx="2" ry="2" />
+<text  x="64.95" y="207.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="1175.2" y="277" width="7.4" height="15.0" fill="rgb(240,91,24)" rx="2" ry="2" />
+<text  x="1178.16" y="287.5" ></text>
+</g>
+<g >
+<title>std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 8.81%)</title><rect x="648.2" y="197" width="103.9" height="15.0" fill="rgb(246,96,8)" rx="2" ry="2" />
+<text  x="651.24" y="207.5" >std::thread:..</text>
+</g>
+<g >
+<title>std::mutex::unlock (1 samples, 0.63%)</title><rect x="544.3" y="101" width="7.5" height="15.0" fill="rgb(246,221,40)" rx="2" ry="2" />
+<text  x="547.34" y="111.5" ></text>
+</g>
+<g >
+<title>std::operator+&lt;char, (1 samples, 0.63%)</title><rect x="39.7" y="309" width="7.4" height="15.0" fill="rgb(217,153,44)" rx="2" ry="2" />
+<text  x="42.69" y="319.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="61.9" y="293" width="7.5" height="15.0" fill="rgb(242,121,43)" rx="2" ry="2" />
+<text  x="64.95" y="303.5" ></text>
+</g>
+<g >
+<title>std::__invoke&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 8.81%)</title><rect x="752.1" y="181" width="103.9" height="15.0" fill="rgb(221,216,29)" rx="2" ry="2" />
+<text  x="755.14" y="191.5" >std::__invok..</text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="69.4" y="277" width="7.4" height="15.0" fill="rgb(230,144,44)" rx="2" ry="2" />
+<text  x="72.37" y="287.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="17.4" y="277" width="7.4" height="15.0" fill="rgb(205,184,43)" rx="2" ry="2" />
+<text  x="20.42" y="287.5" ></text>
+</g>
+<g >
+<title>std::mutex::unlock (1 samples, 0.63%)</title><rect x="136.2" y="101" width="7.4" height="15.0" fill="rgb(250,104,39)" rx="2" ry="2" />
+<text  x="139.16" y="111.5" ></text>
+</g>
+<g >
+<title>_int_malloc(av=av@entry=0x7f8b24000020, (1 samples, 0.63%)</title><rect x="17.4" y="197" width="7.4" height="15.0" fill="rgb(210,202,5)" rx="2" ry="2" />
+<text  x="20.42" y="207.5" ></text>
+</g>
+<g >
+<title>__GI___libc_malloc(bytes=65) (1 samples, 0.63%)</title><rect x="84.2" y="213" width="7.4" height="15.0" fill="rgb(222,13,21)" rx="2" ry="2" />
+<text  x="87.21" y="223.5" ></text>
+</g>
+<g >
+<title>std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 8.81%)</title><rect x="856.0" y="213" width="103.9" height="15.0" fill="rgb(211,78,49)" rx="2" ry="2" />
+<text  x="859.04" y="223.5" >std::thread:..</text>
+</g>
+<g >
+<title>__gthread_mutex_lock(__mutex=0x55bdc58e9648) (1 samples, 0.63%)</title><rect x="440.4" y="85" width="7.5" height="15.0" fill="rgb(240,126,2)" rx="2" ry="2" />
+<text  x="443.44" y="95.5" ></text>
+</g>
+<g >
+<title>std::__future_base::_Task_setter&lt;std::unique_ptr&lt;std::__future_base::_Result&lt;std::pair&lt;double, (14 samples, 8.81%)</title><rect x="648.2" y="229" width="103.9" height="15.0" fill="rgb(243,160,8)" rx="2" ry="2" />
+<text  x="651.24" y="239.5" >std::__futur..</text>
+</g>
+<g >
+<title>std::__future_base::_State_baseV2::wait(this=0x55bdc58e9780) (7 samples, 4.40%)</title><rect x="1049.0" y="389" width="51.9" height="15.0" fill="rgb(210,215,33)" rx="2" ry="2" />
+<text  x="1051.99" y="399.5" >std::..</text>
+</g>
+<g >
+<title>std::__future_base::_State_baseV2::_M_do_set(std::function&lt;std::unique_ptr&lt;std::__future_base::_Result_base, (14 samples, 8.81%)</title><rect x="752.1" y="277" width="103.9" height="15.0" fill="rgb(219,115,34)" rx="2" ry="2" />
+<text  x="755.14" y="287.5" >std::__futur..</text>
+</g>
+<g >
+<title>std::function&lt;std::unique_ptr&lt;std::__future_base::_Result_base,std::__future_base::_Result_base::_Deleter&gt; (14 samples, 8.81%)</title><rect x="440.4" y="261" width="103.9" height="15.0" fill="rgb(229,223,37)" rx="2" ry="2" />
+<text  x="443.44" y="271.5" >std::functio..</text>
+</g>
+<g >
+<title>std::__future_base::_State_baseV2::_M_set_result(std::function&lt;std::unique_ptr&lt;std::__future_base::_Result_base, (112 samples, 70.44%)</title><rect x="128.7" y="341" width="831.2" height="15.0" fill="rgb(227,65,51)" rx="2" ry="2" />
+<text  x="131.74" y="351.5" >std::__future_base::_State_baseV2::_M_set_result(std::function&lt;std::unique_ptr&lt;std::__future_base::_Result_base,</text>
+</g>
+<g >
+<title>std::__invoke&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 8.81%)</title><rect x="128.7" y="181" width="103.9" height="15.0" fill="rgb(246,52,11)" rx="2" ry="2" />
+<text  x="131.74" y="191.5" >std::__invok..</text>
+</g>
+<g >
+<title>__gthread_mutex_unlock(__mutex=0x55bdc58e96f0) (1 samples, 0.63%)</title><rect x="759.6" y="85" width="7.4" height="15.0" fill="rgb(225,69,51)" rx="2" ry="2" />
+<text  x="762.56" y="95.5" ></text>
+</g>
+<g >
+<title>std::operator+&lt;char, (1 samples, 0.63%)</title><rect x="69.4" y="309" width="7.4" height="15.0" fill="rgb(239,59,1)" rx="2" ry="2" />
+<text  x="72.37" y="319.5" ></text>
+</g>
+<g >
+<title>Page::generateId(this=0x7f8b3cdf4bf0, (1 samples, 0.63%)</title><rect x="17.4" y="341" width="7.4" height="15.0" fill="rgb(245,20,40)" rx="2" ry="2" />
+<text  x="20.42" y="351.5" ></text>
+</g>
+<g >
+<title>std::pair&lt;PageId (1 samples, 0.63%)</title><rect x="1175.2" y="325" width="7.4" height="15.0" fill="rgb(210,112,23)" rx="2" ry="2" />
+<text  x="1178.16" y="335.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="106.5" y="293" width="7.4" height="15.0" fill="rgb(248,142,51)" rx="2" ry="2" />
+<text  x="109.48" y="303.5" ></text>
+</g>
+<g >
+<title>__GI___libc_malloc(bytes=65) (1 samples, 0.63%)</title><rect x="99.1" y="213" width="7.4" height="15.0" fill="rgb(238,113,47)" rx="2" ry="2" />
+<text  x="102.06" y="223.5" ></text>
+</g>
+<g >
+<title>all (159 samples, 100%)</title><rect x="10.0" y="501" width="1180.0" height="15.0" fill="rgb(217,164,54)" rx="2" ry="2" />
+<text  x="13.00" y="511.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::AtomicIterator&lt;std::__detail::_Node_iterator&lt;std::pair&lt;PageIdconst, (12 samples, 7.55%)</title><rect x="767.0" y="133" width="89.0" height="15.0" fill="rgb(223,76,32)" rx="2" ry="2" />
+<text  x="769.98" y="143.5" >MultiThrea..</text>
+</g>
+<g >
+<title>std::__detail::_Mod_range_hashing::operator()(this=0x7ffda87601b0, (1 samples, 0.63%)</title><rect x="529.5" y="69" width="7.4" height="15.0" fill="rgb(245,32,3)" rx="2" ry="2" />
+<text  x="532.50" y="79.5" ></text>
+</g>
+<g >
+<title>sysmalloc (1 samples, 0.63%)</title><rect x="61.9" y="181" width="7.5" height="15.0" fill="rgb(238,23,17)" rx="2" ry="2" />
+<text  x="64.95" y="191.5" ></text>
+</g>
+<g >
+<title>__GI___libc_malloc(bytes=65) (1 samples, 0.63%)</title><rect x="17.4" y="213" width="7.4" height="15.0" fill="rgb(222,153,13)" rx="2" ry="2" />
+<text  x="20.42" y="223.5" ></text>
+</g>
+<g >
+<title>std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 8.81%)</title><rect x="752.1" y="197" width="103.9" height="15.0" fill="rgb(239,147,38)" rx="2" ry="2" />
+<text  x="755.14" y="207.5" >std::thread:..</text>
+</g>
+<g >
+<title>_int_malloc(av=av@entry=0x7f8b30000020, (1 samples, 0.63%)</title><rect x="69.4" y="197" width="7.4" height="15.0" fill="rgb(249,206,16)" rx="2" ry="2" />
+<text  x="72.37" y="207.5" ></text>
+</g>
+<g >
+<title>std::uninitialized_copy&lt;std::move_iterator&lt;PageIdAndRank*&gt;, (1 samples, 0.63%)</title><rect x="989.6" y="341" width="7.4" height="15.0" fill="rgb(219,55,31)" rx="2" ry="2" />
+<text  x="992.62" y="351.5" ></text>
+</g>
+<g >
+<title>Page::generateId(this=0x7f8b3f047110, (1 samples, 0.63%)</title><rect x="99.1" y="341" width="7.4" height="15.0" fill="rgb(232,15,27)" rx="2" ry="2" />
+<text  x="102.06" y="351.5" ></text>
+</g>
+<g >
+<title>operatornew(unsigned (1 samples, 0.63%)</title><rect x="39.7" y="229" width="7.4" height="15.0" fill="rgb(227,157,28)" rx="2" ry="2" />
+<text  x="42.69" y="239.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="24.8" y="261" width="7.5" height="15.0" fill="rgb(225,67,4)" rx="2" ry="2" />
+<text  x="27.84" y="271.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="982.2" y="293" width="7.4" height="15.0" fill="rgb(228,35,32)" rx="2" ry="2" />
+<text  x="985.20" y="303.5" ></text>
+</g>
+<g >
+<title>std::_Function_handler&lt;std::unique_ptr&lt;std::__future_base::_Result_base, (14 samples, 8.81%)</title><rect x="752.1" y="245" width="103.9" height="15.0" fill="rgb(206,95,12)" rx="2" ry="2" />
+<text  x="755.14" y="255.5" >std::_Functi..</text>
+</g>
+<g >
+<title>__pthread_once_slow(once_control=0x55bdc58e99c8, (14 samples, 8.81%)</title><rect x="440.4" y="293" width="103.9" height="15.0" fill="rgb(222,189,11)" rx="2" ry="2" />
+<text  x="443.44" y="303.5" >__pthread_on..</text>
+</g>
+<g >
+<title>mprotect() (1 samples, 0.63%)</title><rect x="24.8" y="149" width="7.5" height="15.0" fill="rgb(242,155,4)" rx="2" ry="2" />
+<text  x="27.84" y="159.5" ></text>
+</g>
+<g >
+<title>std::operator+&lt;char, (1 samples, 0.63%)</title><rect x="17.4" y="309" width="7.4" height="15.0" fill="rgb(211,47,29)" rx="2" ry="2" />
+<text  x="20.42" y="319.5" ></text>
+</g>
+<g >
+<title>std::_Function_handler&lt;std::unique_ptr&lt;std::__future_base::_Result_base, (14 samples, 8.81%)</title><rect x="336.5" y="245" width="103.9" height="15.0" fill="rgb(210,193,23)" rx="2" ry="2" />
+<text  x="339.54" y="255.5" >std::_Functi..</text>
+</g>
+<g >
+<title>__gthread_once(__func=&lt;optimized (112 samples, 70.44%)</title><rect x="128.7" y="309" width="831.2" height="15.0" fill="rgb(245,149,25)" rx="2" ry="2" />
+<text  x="131.74" y="319.5" >__gthread_once(__func=&lt;optimized</text>
+</g>
+<g >
+<title>std::__detail::_Hashtable_base&lt;PageId, (1 samples, 0.63%)</title><rect x="1004.5" y="357" width="7.4" height="15.0" fill="rgb(225,7,3)" rx="2" ry="2" />
+<text  x="1007.47" y="367.5" ></text>
+</g>
+<g >
+<title>std::__future_base::_Task_setter&lt;std::unique_ptr&lt;std::__future_base::_Result&lt;std::pair&lt;double, (14 samples, 8.81%)</title><rect x="232.6" y="229" width="103.9" height="15.0" fill="rgb(232,159,15)" rx="2" ry="2" />
+<text  x="235.64" y="239.5" >std::__futur..</text>
+</g>
+<g >
+<title>__GI___libc_malloc(bytes=65) (1 samples, 0.63%)</title><rect x="91.6" y="213" width="7.5" height="15.0" fill="rgb(215,133,18)" rx="2" ry="2" />
+<text  x="94.64" y="223.5" ></text>
+</g>
+<g >
+<title>_int_malloc (1 samples, 0.63%)</title><rect x="113.9" y="197" width="7.4" height="15.0" fill="rgb(246,213,22)" rx="2" ry="2" />
+<text  x="116.90" y="207.5" ></text>
+</g>
+<g >
+<title>std::lock_guard&lt;std::mutex&gt;::~lock_guard (1 samples, 0.63%)</title><rect x="136.2" y="117" width="7.4" height="15.0" fill="rgb(227,62,40)" rx="2" ry="2" />
+<text  x="139.16" y="127.5" ></text>
+</g>
+<g >
+<title>__gthread_mutex_lock(__mutex=0x55bdc58e95d8) (1 samples, 0.63%)</title><rect x="232.6" y="85" width="7.5" height="15.0" fill="rgb(221,92,46)" rx="2" ry="2" />
+<text  x="235.64" y="95.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="17.4" y="261" width="7.4" height="15.0" fill="rgb(245,76,27)" rx="2" ry="2" />
+<text  x="20.42" y="271.5" ></text>
+</g>
+<g >
+<title>std::__invoke_impl&lt;std::pair&lt;double, (14 samples, 8.81%)</title><rect x="336.5" y="165" width="103.9" height="15.0" fill="rgb(228,23,0)" rx="2" ry="2" />
+<text  x="339.54" y="175.5" >std::__invok..</text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="54.5" y="293" width="7.4" height="15.0" fill="rgb(233,217,17)" rx="2" ry="2" />
+<text  x="57.53" y="303.5" ></text>
+</g>
+<g >
+<title>std::operator+&lt;char, (1 samples, 0.63%)</title><rect x="99.1" y="309" width="7.4" height="15.0" fill="rgb(211,156,17)" rx="2" ry="2" />
+<text  x="102.06" y="319.5" ></text>
+</g>
+<g >
+<title>__gthread_once(__func=&lt;optimized (7 samples, 4.40%)</title><rect x="1100.9" y="325" width="52.0" height="15.0" fill="rgb(234,214,48)" rx="2" ry="2" />
+<text  x="1103.94" y="335.5" >__gth..</text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="24.8" y="293" width="7.5" height="15.0" fill="rgb(252,43,43)" rx="2" ry="2" />
+<text  x="27.84" y="303.5" ></text>
+</g>
+<g >
+<title>std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 8.81%)</title><rect x="232.6" y="213" width="103.9" height="15.0" fill="rgb(209,62,22)" rx="2" ry="2" />
+<text  x="235.64" y="223.5" >std::thread:..</text>
+</g>
+<g >
+<title>std::_Hash_impl::hash(__seed=3339675911, (1 samples, 0.63%)</title><rect x="433.0" y="53" width="7.4" height="15.0" fill="rgb(228,16,39)" rx="2" ry="2" />
+<text  x="436.02" y="63.5" ></text>
+</g>
+<g >
+<title>std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 8.81%)</title><rect x="648.2" y="213" width="103.9" height="15.0" fill="rgb(217,121,24)" rx="2" ry="2" />
+<text  x="651.24" y="223.5" >std::thread:..</text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char,std::char_traits&lt;char&gt;, (1 samples, 0.63%)</title><rect x="54.5" y="245" width="7.4" height="15.0" fill="rgb(207,20,7)" rx="2" ry="2" />
+<text  x="57.53" y="255.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="113.9" y="293" width="7.4" height="15.0" fill="rgb(238,147,1)" rx="2" ry="2" />
+<text  x="116.90" y="303.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="84.2" y="277" width="7.4" height="15.0" fill="rgb(251,59,8)" rx="2" ry="2" />
+<text  x="87.21" y="287.5" ></text>
+</g>
+<g >
+<title>__GI___libc_malloc(bytes=71) (1 samples, 0.63%)</title><rect x="974.8" y="309" width="7.4" height="15.0" fill="rgb(242,163,20)" rx="2" ry="2" />
+<text  x="977.78" y="319.5" ></text>
+</g>
+<g >
+<title>main(argc=3, (31 samples, 19.50%)</title><rect x="959.9" y="485" width="230.1" height="15.0" fill="rgb(247,81,53)" rx="2" ry="2" />
+<text  x="962.94" y="495.5" >main(argc=3,</text>
+</g>
+<g >
+<title>Page::generateId(this=0x7f8b3cdf6b70, (1 samples, 0.63%)</title><rect x="32.3" y="341" width="7.4" height="15.0" fill="rgb(230,151,20)" rx="2" ry="2" />
+<text  x="35.26" y="351.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="974.8" y="373" width="7.4" height="15.0" fill="rgb(223,112,1)" rx="2" ry="2" />
+<text  x="977.78" y="383.5" ></text>
+</g>
+<g >
+<title>std::operator+&lt;char, (1 samples, 0.63%)</title><rect x="32.3" y="309" width="7.4" height="15.0" fill="rgb(248,136,27)" rx="2" ry="2" />
+<text  x="35.26" y="319.5" ></text>
+</g>
+<g >
+<title>std::__detail::_Equal_helper&lt;PageId, (1 samples, 0.63%)</title><rect x="1004.5" y="341" width="7.4" height="15.0" fill="rgb(234,213,3)" rx="2" ry="2" />
+<text  x="1007.47" y="351.5" ></text>
+</g>
+<g >
+<title>std::__invoke_impl&lt;std::pair&lt;double, (14 samples, 8.81%)</title><rect x="856.0" y="165" width="103.9" height="15.0" fill="rgb(242,73,9)" rx="2" ry="2" />
+<text  x="859.04" y="175.5" >std::__invok..</text>
+</g>
+<g >
+<title>std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 8.81%)</title><rect x="336.5" y="197" width="103.9" height="15.0" fill="rgb(222,108,1)" rx="2" ry="2" />
+<text  x="339.54" y="207.5" >std::thread:..</text>
+</g>
+<g >
+<title>std::function&lt;std::unique_ptr&lt;std::__future_base::_Result_base,std::__future_base::_Result_base::_Deleter&gt; (14 samples, 8.81%)</title><rect x="752.1" y="261" width="103.9" height="15.0" fill="rgb(239,116,41)" rx="2" ry="2" />
+<text  x="755.14" y="271.5" >std::functio..</text>
+</g>
+<g >
+<title>std::thread::join()() (7 samples, 4.40%)</title><rect x="1100.9" y="293" width="52.0" height="15.0" fill="rgb(223,120,44)" rx="2" ry="2" />
+<text  x="1103.94" y="303.5" >std::..</text>
+</g>
+<g >
+<title>PageIdAndRank::PageIdAndRank (1 samples, 0.63%)</title><rect x="989.6" y="293" width="7.4" height="15.0" fill="rgb(247,209,6)" rx="2" ry="2" />
+<text  x="992.62" y="303.5" ></text>
+</g>
+<g >
+<title>std::__future_base::_Async_state_commonV2::_M_join (7 samples, 4.40%)</title><rect x="1049.0" y="357" width="51.9" height="15.0" fill="rgb(207,3,27)" rx="2" ry="2" />
+<text  x="1051.99" y="367.5" >std::..</text>
+</g>
+<g >
+<title>std::lock_guard&lt;std::mutex&gt;::~lock_guard (2 samples, 1.26%)</title><rect x="752.1" y="117" width="14.9" height="15.0" fill="rgb(224,177,44)" rx="2" ry="2" />
+<text  x="755.14" y="127.5" ></text>
+</g>
+<g >
+<title>std::operator+&lt;char, (1 samples, 0.63%)</title><rect x="106.5" y="309" width="7.4" height="15.0" fill="rgb(212,113,34)" rx="2" ry="2" />
+<text  x="109.48" y="319.5" ></text>
+</g>
+<g >
+<title>__gthread_mutex_unlock(__mutex=0x55bdc58e95a0) (1 samples, 0.63%)</title><rect x="752.1" y="85" width="7.5" height="15.0" fill="rgb(213,156,49)" rx="2" ry="2" />
+<text  x="755.14" y="95.5" ></text>
+</g>
+<g >
+<title>_int_malloc(av=av@entry=0x7f8b1c000020, (1 samples, 0.63%)</title><rect x="32.3" y="197" width="7.4" height="15.0" fill="rgb(226,157,45)" rx="2" ry="2" />
+<text  x="35.26" y="207.5" ></text>
+</g>
+<g >
+<title>_int_malloc(av=av@entry=0x7f8b28000020, (1 samples, 0.63%)</title><rect x="106.5" y="197" width="7.4" height="15.0" fill="rgb(210,151,29)" rx="2" ry="2" />
+<text  x="109.48" y="207.5" ></text>
+</g>
+<g >
+<title>std::__future_base::_Task_setter&lt;std::unique_ptr&lt;std::__future_base::_Result&lt;std::pair&lt;double, (14 samples, 8.81%)</title><rect x="336.5" y="229" width="103.9" height="15.0" fill="rgb(240,114,13)" rx="2" ry="2" />
+<text  x="339.54" y="239.5" >std::__futur..</text>
+</g>
+<g >
+<title>std::__invoke_impl&lt;std::pair&lt;double, (14 samples, 8.81%)</title><rect x="440.4" y="165" width="103.9" height="15.0" fill="rgb(236,198,45)" rx="2" ry="2" />
+<text  x="443.44" y="175.5" >std::__invok..</text>
+</g>
+<g >
+<title>sysmalloc (1 samples, 0.63%)</title><rect x="54.5" y="181" width="7.4" height="15.0" fill="rgb(231,116,2)" rx="2" ry="2" />
+<text  x="57.53" y="191.5" ></text>
+</g>
+<g >
+<title>std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 8.81%)</title><rect x="544.3" y="197" width="103.9" height="15.0" fill="rgb(236,41,44)" rx="2" ry="2" />
+<text  x="547.34" y="207.5" >std::thread:..</text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="24.8" y="277" width="7.5" height="15.0" fill="rgb(206,38,50)" rx="2" ry="2" />
+<text  x="27.84" y="287.5" ></text>
+</g>
+<g >
+<title>std::__future_base::_Task_setter&lt;std::unique_ptr&lt;std::__future_base::_Result&lt;std::pair&lt;double, (14 samples, 8.81%)</title><rect x="128.7" y="229" width="103.9" height="15.0" fill="rgb(223,82,39)" rx="2" ry="2" />
+<text  x="131.74" y="239.5" >std::__futur..</text>
+</g>
+<g >
+<title>SimpleIdGenerator::generateId (1 samples, 0.63%)</title><rect x="47.1" y="325" width="7.4" height="15.0" fill="rgb(242,200,34)" rx="2" ry="2" />
+<text  x="50.11" y="335.5" ></text>
+</g>
+<g >
+<title>std::__invoke_impl&lt;std::pair&lt;double, (14 samples, 8.81%)</title><rect x="232.6" y="165" width="103.9" height="15.0" fill="rgb(231,228,29)" rx="2" ry="2" />
+<text  x="235.64" y="175.5" >std::__invok..</text>
+</g>
+<g >
+<title>start_thread(arg=&lt;optimized (128 samples, 80.50%)</title><rect x="10.0" y="469" width="949.9" height="15.0" fill="rgb(242,9,27)" rx="2" ry="2" />
+<text  x="13.00" y="479.5" >start_thread(arg=&lt;optimized</text>
+</g>
+<g >
+<title>std::lock_guard&lt;std::mutex&gt;::lock_guard (2 samples, 1.26%)</title><rect x="648.2" y="117" width="14.9" height="15.0" fill="rgb(239,14,37)" rx="2" ry="2" />
+<text  x="651.24" y="127.5" ></text>
+</g>
+<g >
+<title>std::unordered_map&lt;PageId, (4 samples, 2.52%)</title><rect x="1152.9" y="437" width="29.7" height="15.0" fill="rgb(224,120,8)" rx="2" ry="2" />
+<text  x="1155.89" y="447.5" >st..</text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;,std::unordered_map&lt;PageId, (1 samples, 0.63%)</title><rect x="225.2" y="149" width="7.4" height="15.0" fill="rgb(212,33,30)" rx="2" ry="2" />
+<text  x="228.22" y="159.5" ></text>
+</g>
+<g >
+<title>std::thread::_Invoker&lt;std::tuple&lt;std::__future_base::_Async_state_impl&lt;std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (112 samples, 70.44%)</title><rect x="128.7" y="421" width="831.2" height="15.0" fill="rgb(247,106,25)" rx="2" ry="2" />
+<text  x="131.74" y="431.5" >std::thread::_Invoker&lt;std::tuple&lt;std::__future_base::_Async_state_impl&lt;std::thread::_Invoker&lt;std::tuple&lt;MultiThread..</text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="69.4" y="293" width="7.4" height="15.0" fill="rgb(230,123,6)" rx="2" ry="2" />
+<text  x="72.37" y="303.5" ></text>
+</g>
+<g >
+<title>Page::generateId(this=0x7f8b3f04a7d0, (1 samples, 0.63%)</title><rect x="121.3" y="341" width="7.4" height="15.0" fill="rgb(211,106,11)" rx="2" ry="2" />
+<text  x="124.32" y="351.5" ></text>
+</g>
+<g >
+<title>mprotect() (1 samples, 0.63%)</title><rect x="91.6" y="149" width="7.5" height="15.0" fill="rgb(246,0,1)" rx="2" ry="2" />
+<text  x="94.64" y="159.5" ></text>
+</g>
+<g >
+<title>__pthread_mutex_unlock_usercnt(mutex=0x55bdc58e95a0, (1 samples, 0.63%)</title><rect x="136.2" y="69" width="7.4" height="15.0" fill="rgb(251,209,30)" rx="2" ry="2" />
+<text  x="139.16" y="79.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;,std::unordered_map&lt;PageId, (2 samples, 1.26%)</title><rect x="737.3" y="149" width="14.8" height="15.0" fill="rgb(212,161,42)" rx="2" ry="2" />
+<text  x="740.30" y="159.5" ></text>
+</g>
+<g >
+<title>std::__detail::_Hash_code_base&lt;PageId, (1 samples, 0.63%)</title><rect x="433.0" y="101" width="7.4" height="15.0" fill="rgb(247,166,6)" rx="2" ry="2" />
+<text  x="436.02" y="111.5" ></text>
+</g>
+<g >
+<title>std::_Hashtable&lt;PageId,std::pair&lt;PageId (1 samples, 0.63%)</title><rect x="1034.2" y="357" width="7.4" height="15.0" fill="rgb(205,147,15)" rx="2" ry="2" />
+<text  x="1037.15" y="367.5" ></text>
+</g>
+<g >
+<title>std::__future_base::_Async_state_impl&lt;std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (112 samples, 70.44%)</title><rect x="128.7" y="357" width="831.2" height="15.0" fill="rgb(231,7,30)" rx="2" ry="2" />
+<text  x="131.74" y="367.5" >std::__future_base::_Async_state_impl&lt;std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(M..</text>
+</g>
+<g >
+<title>std::thread::join()() (2 samples, 1.26%)</title><rect x="959.9" y="405" width="14.9" height="15.0" fill="rgb(230,183,50)" rx="2" ry="2" />
+<text  x="962.94" y="415.5" ></text>
+</g>
+<g >
+<title>pageRankComputationWithNumNodes(num=500000, (31 samples, 19.50%)</title><rect x="959.9" y="469" width="230.1" height="15.0" fill="rgb(251,147,42)" rx="2" ry="2" />
+<text  x="962.94" y="479.5" >pageRankComputationWithNumNode..</text>
+</g>
+<g >
+<title>SimpleIdGenerator::generateId (1 samples, 0.63%)</title><rect x="84.2" y="325" width="7.4" height="15.0" fill="rgb(234,68,51)" rx="2" ry="2" />
+<text  x="87.21" y="335.5" ></text>
+</g>
+<g >
+<title>std::function&lt;std::unique_ptr&lt;std::__future_base::_Result_base,std::__future_base::_Result_base::_Deleter&gt; (14 samples, 8.81%)</title><rect x="648.2" y="261" width="103.9" height="15.0" fill="rgb(207,207,35)" rx="2" ry="2" />
+<text  x="651.24" y="271.5" >std::functio..</text>
+</g>
+<g >
+<title>mprotect() (1 samples, 0.63%)</title><rect x="39.7" y="149" width="7.4" height="15.0" fill="rgb(248,195,45)" rx="2" ry="2" />
+<text  x="42.69" y="159.5" ></text>
+</g>
+<g >
+<title>_int_malloc (2 samples, 1.26%)</title><rect x="1011.9" y="309" width="14.8" height="15.0" fill="rgb(237,123,31)" rx="2" ry="2" />
+<text  x="1014.89" y="319.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="982.2" y="325" width="7.4" height="15.0" fill="rgb(231,142,19)" rx="2" ry="2" />
+<text  x="985.20" y="335.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="982.2" y="341" width="7.4" height="15.0" fill="rgb(234,25,1)" rx="2" ry="2" />
+<text  x="985.20" y="351.5" ></text>
+</g>
+<g >
+<title>std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 8.81%)</title><rect x="336.5" y="213" width="103.9" height="15.0" fill="rgb(205,101,8)" rx="2" ry="2" />
+<text  x="339.54" y="223.5" >std::thread:..</text>
+</g>
+<g >
+<title>std::char_traits&lt;char&gt;::copy(__n=70, (1 samples, 0.63%)</title><rect x="982.2" y="277" width="7.4" height="15.0" fill="rgb(222,2,15)" rx="2" ry="2" />
+<text  x="985.20" y="287.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (12 samples, 7.55%)</title><rect x="856.0" y="149" width="89.1" height="15.0" fill="rgb(253,92,1)" rx="2" ry="2" />
+<text  x="859.04" y="159.5" >MultiThrea..</text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (13 samples, 8.18%)</title><rect x="440.4" y="149" width="96.5" height="15.0" fill="rgb(235,138,48)" rx="2" ry="2" />
+<text  x="443.44" y="159.5" >MultiThread..</text>
+</g>
+<g >
+<title>std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 8.81%)</title><rect x="544.3" y="213" width="103.9" height="15.0" fill="rgb(227,160,12)" rx="2" ry="2" />
+<text  x="547.34" y="223.5" >std::thread:..</text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="76.8" y="277" width="7.4" height="15.0" fill="rgb(222,151,20)" rx="2" ry="2" />
+<text  x="79.79" y="287.5" ></text>
+</g>
+<g >
+<title>std::_Hashtable&lt;PageId,std::pair&lt;PageId (2 samples, 1.26%)</title><rect x="1026.7" y="389" width="14.9" height="15.0" fill="rgb(226,42,28)" rx="2" ry="2" />
+<text  x="1029.73" y="399.5" ></text>
+</g>
+<g >
+<title>std::unordered_map&lt;PageId, (2 samples, 1.26%)</title><rect x="425.6" y="133" width="14.8" height="15.0" fill="rgb(249,51,10)" rx="2" ry="2" />
+<text  x="428.60" y="143.5" ></text>
+</g>
+<g >
+<title>__GI___pthread_timedjoin_ex(threadid=140236071249664, (7 samples, 4.40%)</title><rect x="1049.0" y="277" width="51.9" height="15.0" fill="rgb(236,126,23)" rx="2" ry="2" />
+<text  x="1051.99" y="287.5" >__GI_..</text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::generatePageIds(MultiThreadedPageRankComputer::Pool&amp;,Network (16 samples, 10.06%)</title><rect x="10.0" y="357" width="118.7" height="15.0" fill="rgb(231,19,28)" rx="2" ry="2" />
+<text  x="13.00" y="367.5" >MultiThreadedP..</text>
+</g>
+<g >
+<title>std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 8.81%)</title><rect x="232.6" y="197" width="103.9" height="15.0" fill="rgb(235,218,28)" rx="2" ry="2" />
+<text  x="235.64" y="207.5" >std::thread:..</text>
+</g>
+<g >
+<title>operatornew(unsigned (1 samples, 0.63%)</title><rect x="113.9" y="229" width="7.4" height="15.0" fill="rgb(228,214,23)" rx="2" ry="2" />
+<text  x="116.90" y="239.5" ></text>
+</g>
+<g >
+<title>std::__detail::_Hashtable_alloc&lt;std::allocator&lt;std::__detail::_Hash_node&lt;std::pair&lt;PageId (1 samples, 0.63%)</title><rect x="1175.2" y="389" width="7.4" height="15.0" fill="rgb(244,203,22)" rx="2" ry="2" />
+<text  x="1178.16" y="399.5" ></text>
+</g>
+<g >
+<title>std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 8.81%)</title><rect x="440.4" y="197" width="103.9" height="15.0" fill="rgb(252,28,25)" rx="2" ry="2" />
+<text  x="443.44" y="207.5" >std::thread:..</text>
+</g>
+<g >
+<title>std::_Construct&lt;PageIdAndRank, (1 samples, 0.63%)</title><rect x="989.6" y="309" width="7.4" height="15.0" fill="rgb(224,7,8)" rx="2" ry="2" />
+<text  x="992.62" y="319.5" ></text>
+</g>
+<g >
+<title>__GI___pthread_mutex_lock(mutex=0x55bdc58e95d8) (1 samples, 0.63%)</title><rect x="232.6" y="69" width="7.5" height="15.0" fill="rgb(244,40,38)" rx="2" ry="2" />
+<text  x="235.64" y="79.5" ></text>
+</g>
+<g >
+<title>sysmalloc (1 samples, 0.63%)</title><rect x="32.3" y="181" width="7.4" height="15.0" fill="rgb(216,3,53)" rx="2" ry="2" />
+<text  x="35.26" y="191.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="106.5" y="277" width="7.4" height="15.0" fill="rgb(225,121,45)" rx="2" ry="2" />
+<text  x="109.48" y="287.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char,std::char_traits&lt;char&gt;, (1 samples, 0.63%)</title><rect x="24.8" y="245" width="7.5" height="15.0" fill="rgb(226,192,19)" rx="2" ry="2" />
+<text  x="27.84" y="255.5" ></text>
+</g>
+<g >
+<title>std::operator+&lt;char, (1 samples, 0.63%)</title><rect x="61.9" y="309" width="7.5" height="15.0" fill="rgb(224,197,44)" rx="2" ry="2" />
+<text  x="64.95" y="319.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="113.9" y="277" width="7.4" height="15.0" fill="rgb(233,151,25)" rx="2" ry="2" />
+<text  x="116.90" y="287.5" ></text>
+</g>
+<g >
+<title>grow_heap(diff=4096, (1 samples, 0.63%)</title><rect x="47.1" y="165" width="7.4" height="15.0" fill="rgb(254,76,28)" rx="2" ry="2" />
+<text  x="50.11" y="175.5" ></text>
+</g>
+<g >
+<title>std::__future_base::_Task_setter&lt;std::unique_ptr&lt;std::__future_base::_Result&lt;std::pair&lt;double, (14 samples, 8.81%)</title><rect x="544.3" y="229" width="103.9" height="15.0" fill="rgb(245,194,53)" rx="2" ry="2" />
+<text  x="547.34" y="239.5" >std::__futur..</text>
+</g>
+<g >
+<title>_int_malloc(av=av@entry=0x7f8b20000020, (1 samples, 0.63%)</title><rect x="91.6" y="197" width="7.5" height="15.0" fill="rgb(228,20,26)" rx="2" ry="2" />
+<text  x="94.64" y="207.5" ></text>
+</g>
+<g >
+<title>std::mutex::lock (1 samples, 0.63%)</title><rect x="128.7" y="101" width="7.5" height="15.0" fill="rgb(222,92,32)" rx="2" ry="2" />
+<text  x="131.74" y="111.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::Pool::join(this=0x7ffda8760170) (2 samples, 1.26%)</title><rect x="959.9" y="421" width="14.9" height="15.0" fill="rgb(236,35,30)" rx="2" ry="2" />
+<text  x="962.94" y="431.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;PageId,std::allocator&lt;PageId&gt; (1 samples, 0.63%)</title><rect x="1041.6" y="421" width="7.4" height="15.0" fill="rgb(252,217,9)" rx="2" ry="2" />
+<text  x="1044.57" y="431.5" ></text>
+</g>
+<g >
+<title>std::_Hashtable&lt;PageId, (2 samples, 1.26%)</title><rect x="1026.7" y="373" width="14.9" height="15.0" fill="rgb(232,212,8)" rx="2" ry="2" />
+<text  x="1029.73" y="383.5" ></text>
+</g>
+<g >
+<title>Page::generateId(this=0x7f8b3f048490, (1 samples, 0.63%)</title><rect x="113.9" y="341" width="7.4" height="15.0" fill="rgb(221,160,37)" rx="2" ry="2" />
+<text  x="116.90" y="351.5" ></text>
+</g>
+<g >
+<title>std::__detail::_Hash_code_base&lt;PageId, (1 samples, 0.63%)</title><rect x="997.0" y="341" width="7.5" height="15.0" fill="rgb(208,81,13)" rx="2" ry="2" />
+<text  x="1000.04" y="351.5" ></text>
+</g>
+<g >
+<title>std::mutex::unlock (2 samples, 1.26%)</title><rect x="663.1" y="101" width="14.8" height="15.0" fill="rgb(208,0,47)" rx="2" ry="2" />
+<text  x="666.08" y="111.5" ></text>
+</g>
+<g >
+<title>std::call_once&lt;void (112 samples, 70.44%)</title><rect x="128.7" y="325" width="831.2" height="15.0" fill="rgb(233,85,18)" rx="2" ry="2" />
+<text  x="131.74" y="335.5" >std::call_once&lt;void</text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::computeForNetwork (30 samples, 18.87%)</title><rect x="959.9" y="453" width="222.7" height="15.0" fill="rgb(210,40,49)" rx="2" ry="2" />
+<text  x="962.94" y="463.5" >MultiThreadedPageRankComputer..</text>
+</g>
+<g >
+<title>SimpleIdGenerator::generateId (1 samples, 0.63%)</title><rect x="54.5" y="325" width="7.4" height="15.0" fill="rgb(252,112,8)" rx="2" ry="2" />
+<text  x="57.53" y="335.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="982.2" y="373" width="7.4" height="15.0" fill="rgb(223,192,13)" rx="2" ry="2" />
+<text  x="985.20" y="383.5" ></text>
+</g>
+<g >
+<title>std::allocator_traits&lt;std::allocator&lt;std::__detail::_Hash_node_base*&gt; (3 samples, 1.89%)</title><rect x="1152.9" y="357" width="22.3" height="15.0" fill="rgb(213,158,25)" rx="2" ry="2" />
+<text  x="1155.89" y="367.5" >s..</text>
+</g>
+<g >
+<title>__GI___libc_malloc(bytes=65) (1 samples, 0.63%)</title><rect x="47.1" y="213" width="7.4" height="15.0" fill="rgb(233,151,24)" rx="2" ry="2" />
+<text  x="50.11" y="223.5" ></text>
+</g>
+<g >
+<title>std::__invoke&lt;std::__future_base::_Async_state_impl&lt;std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (112 samples, 70.44%)</title><rect x="128.7" y="389" width="831.2" height="15.0" fill="rgb(211,183,16)" rx="2" ry="2" />
+<text  x="131.74" y="399.5" >std::__invoke&lt;std::__future_base::_Async_state_impl&lt;std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer:..</text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="39.7" y="261" width="7.4" height="15.0" fill="rgb(215,102,2)" rx="2" ry="2" />
+<text  x="42.69" y="271.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="84.2" y="293" width="7.4" height="15.0" fill="rgb(249,40,13)" rx="2" ry="2" />
+<text  x="87.21" y="303.5" ></text>
+</g>
+<g >
+<title>std::__invoke_impl&lt;std::pair&lt;double, (14 samples, 8.81%)</title><rect x="752.1" y="165" width="103.9" height="15.0" fill="rgb(230,44,32)" rx="2" ry="2" />
+<text  x="755.14" y="175.5" >std::__invok..</text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="121.3" y="261" width="7.4" height="15.0" fill="rgb(209,50,34)" rx="2" ry="2" />
+<text  x="124.32" y="271.5" ></text>
+</g>
+<g >
+<title>std::_Function_handler&lt;std::unique_ptr&lt;std::__future_base::_Result_base, (14 samples, 8.81%)</title><rect x="856.0" y="245" width="103.9" height="15.0" fill="rgb(215,218,51)" rx="2" ry="2" />
+<text  x="859.04" y="255.5" >std::_Functi..</text>
+</g>
+<g >
+<title>std::_Function_handler&lt;std::unique_ptr&lt;std::__future_base::_Result_base, (14 samples, 8.81%)</title><rect x="544.3" y="245" width="103.9" height="15.0" fill="rgb(239,53,10)" rx="2" ry="2" />
+<text  x="547.34" y="255.5" >std::_Functi..</text>
+</g>
+<g >
+<title>__gthread_once(__func=&lt;optimized (7 samples, 4.40%)</title><rect x="1049.0" y="325" width="51.9" height="15.0" fill="rgb(222,110,35)" rx="2" ry="2" />
+<text  x="1051.99" y="335.5" >__gth..</text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="982.2" y="309" width="7.4" height="15.0" fill="rgb(252,178,51)" rx="2" ry="2" />
+<text  x="985.20" y="319.5" ></text>
+</g>
+<g >
+<title>std::__future_base::_Task_setter&lt;std::unique_ptr&lt;std::__future_base::_Result&lt;std::pair&lt;double, (14 samples, 8.81%)</title><rect x="752.1" y="229" width="103.9" height="15.0" fill="rgb(248,99,54)" rx="2" ry="2" />
+<text  x="755.14" y="239.5" >std::__futur..</text>
+</g>
+<g >
+<title>operatornew(unsigned (1 samples, 0.63%)</title><rect x="121.3" y="229" width="7.4" height="15.0" fill="rgb(212,5,0)" rx="2" ry="2" />
+<text  x="124.32" y="239.5" ></text>
+</g>
+<g >
+<title>__GI___pthread_timedjoin_ex(threadid=140236096427776, (2 samples, 1.26%)</title><rect x="959.9" y="389" width="14.9" height="15.0" fill="rgb(228,152,0)" rx="2" ry="2" />
+<text  x="962.94" y="399.5" ></text>
+</g>
+<g >
+<title>std::__detail::_Hashtable_alloc&lt;std::allocator&lt;std::__detail::_Hash_node&lt;std::pair&lt;PageId (3 samples, 1.89%)</title><rect x="1152.9" y="373" width="22.3" height="15.0" fill="rgb(242,45,7)" rx="2" ry="2" />
+<text  x="1155.89" y="383.5" >s..</text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (12 samples, 7.55%)</title><rect x="648.2" y="149" width="89.1" height="15.0" fill="rgb(252,221,53)" rx="2" ry="2" />
+<text  x="651.24" y="159.5" >MultiThrea..</text>
+</g>
+<g >
+<title>__GI___libc_malloc(bytes=65) (1 samples, 0.63%)</title><rect x="39.7" y="213" width="7.4" height="15.0" fill="rgb(208,38,47)" rx="2" ry="2" />
+<text  x="42.69" y="223.5" ></text>
+</g>
+<g >
+<title>std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 8.81%)</title><rect x="128.7" y="197" width="103.9" height="15.0" fill="rgb(215,54,10)" rx="2" ry="2" />
+<text  x="131.74" y="207.5" >std::thread:..</text>
+</g>
+<g >
+<title>Page::Page (1 samples, 0.63%)</title><rect x="1182.6" y="373" width="7.4" height="15.0" fill="rgb(214,26,53)" rx="2" ry="2" />
+<text  x="1185.58" y="383.5" ></text>
+</g>
+<g >
+<title>std::_Function_handler&lt;std::unique_ptr&lt;std::__future_base::_Result_base, (14 samples, 8.81%)</title><rect x="232.6" y="245" width="103.9" height="15.0" fill="rgb(248,106,1)" rx="2" ry="2" />
+<text  x="235.64" y="255.5" >std::_Functi..</text>
+</g>
+<g >
+<title>grow_heap(diff=4096, (1 samples, 0.63%)</title><rect x="39.7" y="165" width="7.4" height="15.0" fill="rgb(224,181,36)" rx="2" ry="2" />
+<text  x="42.69" y="175.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="99.1" y="261" width="7.4" height="15.0" fill="rgb(210,194,45)" rx="2" ry="2" />
+<text  x="102.06" y="271.5" ></text>
+</g>
+<g >
+<title>__GI___libc_malloc(bytes=65) (1 samples, 0.63%)</title><rect x="24.8" y="213" width="7.5" height="15.0" fill="rgb(248,115,37)" rx="2" ry="2" />
+<text  x="27.84" y="223.5" ></text>
+</g>
+<g >
+<title>std::__future_base::_Async_state_commonV2::_M_complete_async (7 samples, 4.40%)</title><rect x="1100.9" y="373" width="52.0" height="15.0" fill="rgb(237,28,16)" rx="2" ry="2" />
+<text  x="1103.94" y="383.5" >std::..</text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="982.2" y="357" width="7.4" height="15.0" fill="rgb(243,190,26)" rx="2" ry="2" />
+<text  x="985.20" y="367.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="91.6" y="277" width="7.5" height="15.0" fill="rgb(216,8,19)" rx="2" ry="2" />
+<text  x="94.64" y="287.5" ></text>
+</g>
+<g >
+<title>__GI___pthread_timedjoin_ex(threadid=140235774093056, (7 samples, 4.40%)</title><rect x="1100.9" y="277" width="52.0" height="15.0" fill="rgb(206,108,48)" rx="2" ry="2" />
+<text  x="1103.94" y="287.5" >__GI_..</text>
+</g>
+<g >
+<title>std::__detail::_Map_base&lt;PageId,std::pair&lt;PageId (2 samples, 1.26%)</title><rect x="1026.7" y="405" width="14.9" height="15.0" fill="rgb(207,205,32)" rx="2" ry="2" />
+<text  x="1029.73" y="415.5" ></text>
+</g>
+<g >
+<title>std::__future_base::_State_baseV2::_M_do_set(std::function&lt;std::unique_ptr&lt;std::__future_base::_Result_base, (14 samples, 8.81%)</title><rect x="128.7" y="277" width="103.9" height="15.0" fill="rgb(241,78,48)" rx="2" ry="2" />
+<text  x="131.74" y="287.5" >std::__futur..</text>
+</g>
+<g >
+<title>std::_Hashtable&lt;PageId, (3 samples, 1.89%)</title><rect x="1152.9" y="389" width="22.3" height="15.0" fill="rgb(234,173,19)" rx="2" ry="2" />
+<text  x="1155.89" y="399.5" >s..</text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="32.3" y="293" width="7.4" height="15.0" fill="rgb(232,212,13)" rx="2" ry="2" />
+<text  x="35.26" y="303.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="989.6" y="261" width="7.4" height="15.0" fill="rgb(230,194,42)" rx="2" ry="2" />
+<text  x="992.62" y="271.5" ></text>
+</g>
+<g >
+<title>operatornew(unsigned (1 samples, 0.63%)</title><rect x="99.1" y="229" width="7.4" height="15.0" fill="rgb(240,94,12)" rx="2" ry="2" />
+<text  x="102.06" y="239.5" ></text>
+</g>
+<g >
+<title>std::function&lt;std::unique_ptr&lt;std::__future_base::_Result_base,std::__future_base::_Result_base::_Deleter&gt; (14 samples, 8.81%)</title><rect x="544.3" y="261" width="103.9" height="15.0" fill="rgb(240,216,32)" rx="2" ry="2" />
+<text  x="547.34" y="271.5" >std::functio..</text>
+</g>
+<g >
+<title>std::_Hashtable&lt;PageId, (1 samples, 0.63%)</title><rect x="425.6" y="101" width="7.4" height="15.0" fill="rgb(223,43,47)" rx="2" ry="2" />
+<text  x="428.60" y="111.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char,std::char_traits&lt;char&gt;, (1 samples, 0.63%)</title><rect x="1175.2" y="245" width="7.4" height="15.0" fill="rgb(239,83,28)" rx="2" ry="2" />
+<text  x="1178.16" y="255.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="974.8" y="389" width="7.4" height="15.0" fill="rgb(241,144,3)" rx="2" ry="2" />
+<text  x="977.78" y="399.5" ></text>
+</g>
+<g >
+<title>Page::generateId(this=0x7f8b3cdf6450, (1 samples, 0.63%)</title><rect x="24.8" y="341" width="7.5" height="15.0" fill="rgb(249,207,53)" rx="2" ry="2" />
+<text  x="27.84" y="351.5" ></text>
+</g>
+<g >
+<title>__GI___pthread_mutex_lock(mutex=0x55bdc58e9648) (1 samples, 0.63%)</title><rect x="440.4" y="69" width="7.5" height="15.0" fill="rgb(233,102,18)" rx="2" ry="2" />
+<text  x="443.44" y="79.5" ></text>
+</g>
+<g >
+<title>std::_Hashtable&lt;PageId, (1 samples, 0.63%)</title><rect x="529.5" y="101" width="7.4" height="15.0" fill="rgb(237,17,44)" rx="2" ry="2" />
+<text  x="532.50" y="111.5" ></text>
+</g>
+<g >
+<title>SimpleIdGenerator::generateId (1 samples, 0.63%)</title><rect x="69.4" y="325" width="7.4" height="15.0" fill="rgb(208,213,20)" rx="2" ry="2" />
+<text  x="72.37" y="335.5" ></text>
+</g>
+<g >
+<title>malloc_consolidate(av=av@entry=0x7f8b42d26c40 (3 samples, 1.89%)</title><rect x="1152.9" y="309" width="22.3" height="15.0" fill="rgb(208,48,40)" rx="2" ry="2" />
+<text  x="1155.89" y="319.5" >m..</text>
+</g>
+<g >
+<title>std::mutex::lock (1 samples, 0.63%)</title><rect x="336.5" y="101" width="7.5" height="15.0" fill="rgb(229,139,8)" rx="2" ry="2" />
+<text  x="339.54" y="111.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::AtomicIterator&lt;std::__detail::_Node_iterator&lt;std::pair&lt;PageId (1 samples, 0.63%)</title><rect x="544.3" y="133" width="7.5" height="15.0" fill="rgb(238,141,54)" rx="2" ry="2" />
+<text  x="547.34" y="143.5" ></text>
+</g>
+<g >
+<title>std::operator+&lt;char, (1 samples, 0.63%)</title><rect x="76.8" y="309" width="7.4" height="15.0" fill="rgb(248,215,39)" rx="2" ry="2" />
+<text  x="79.79" y="319.5" ></text>
+</g>
+<g >
+<title>std::__detail::_Mod_range_hashing::operator() (1 samples, 0.63%)</title><rect x="425.6" y="69" width="7.4" height="15.0" fill="rgb(244,187,27)" rx="2" ry="2" />
+<text  x="428.60" y="79.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char,std::char_traits&lt;char&gt;, (1 samples, 0.63%)</title><rect x="106.5" y="245" width="7.4" height="15.0" fill="rgb(252,144,36)" rx="2" ry="2" />
+<text  x="109.48" y="255.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="32.3" y="277" width="7.4" height="15.0" fill="rgb(213,130,37)" rx="2" ry="2" />
+<text  x="35.26" y="287.5" ></text>
+</g>
+<g >
+<title>operatornew(unsigned (1 samples, 0.63%)</title><rect x="974.8" y="325" width="7.4" height="15.0" fill="rgb(212,13,2)" rx="2" ry="2" />
+<text  x="977.78" y="335.5" ></text>
+</g>
+<g >
+<title>std::function&lt;std::unique_ptr&lt;std::__future_base::_Result_base,std::__future_base::_Result_base::_Deleter&gt; (14 samples, 8.81%)</title><rect x="128.7" y="261" width="103.9" height="15.0" fill="rgb(230,107,35)" rx="2" ry="2" />
+<text  x="131.74" y="271.5" >std::functio..</text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="76.8" y="261" width="7.4" height="15.0" fill="rgb(213,34,31)" rx="2" ry="2" />
+<text  x="79.79" y="271.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="32.3" y="261" width="7.4" height="15.0" fill="rgb(219,34,41)" rx="2" ry="2" />
+<text  x="35.26" y="271.5" ></text>
+</g>
+<g >
+<title>std::thread::_State_impl&lt;std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::generatePageIds(MultiThreadedPageRankComputer::Pool&amp;, (16 samples, 10.06%)</title><rect x="10.0" y="437" width="118.7" height="15.0" fill="rgb(243,144,32)" rx="2" ry="2" />
+<text  x="13.00" y="447.5" >std::thread::_..</text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="47.1" y="293" width="7.4" height="15.0" fill="rgb(205,94,16)" rx="2" ry="2" />
+<text  x="50.11" y="303.5" ></text>
+</g>
+<g >
+<title>operatornew(unsigned (1 samples, 0.63%)</title><rect x="24.8" y="229" width="7.5" height="15.0" fill="rgb(219,118,9)" rx="2" ry="2" />
+<text  x="27.84" y="239.5" ></text>
+</g>
+<g >
+<title>mprotect() (1 samples, 0.63%)</title><rect x="99.1" y="149" width="7.4" height="15.0" fill="rgb(212,194,46)" rx="2" ry="2" />
+<text  x="102.06" y="159.5" ></text>
+</g>
+<g >
+<title>std::__invoke_impl&lt;std::pair&lt;double, (14 samples, 8.81%)</title><rect x="128.7" y="165" width="103.9" height="15.0" fill="rgb(248,195,0)" rx="2" ry="2" />
+<text  x="131.74" y="175.5" >std::__invok..</text>
+</g>
+<g >
+<title>std::pair&lt;PageId (1 samples, 0.63%)</title><rect x="982.2" y="421" width="7.4" height="15.0" fill="rgb(254,40,43)" rx="2" ry="2" />
+<text  x="985.20" y="431.5" ></text>
+</g>
+<g >
+<title>_int_malloc(av=av@entry=0x7f8b38000020, (1 samples, 0.63%)</title><rect x="47.1" y="197" width="7.4" height="15.0" fill="rgb(206,204,24)" rx="2" ry="2" />
+<text  x="50.11" y="207.5" ></text>
+</g>
+<g >
+<title>__pthread_mutex_unlock_usercnt(mutex=0x55bdc58e95d8, (2 samples, 1.26%)</title><rect x="663.1" y="69" width="14.8" height="15.0" fill="rgb(218,177,51)" rx="2" ry="2" />
+<text  x="666.08" y="79.5" ></text>
+</g>
+<g >
+<title>std::allocator_traits&lt;std::allocator&lt;std::__detail::_Hash_node&lt;std::pair&lt;PageId (2 samples, 1.26%)</title><rect x="1011.9" y="373" width="14.8" height="15.0" fill="rgb(223,86,18)" rx="2" ry="2" />
+<text  x="1014.89" y="383.5" ></text>
+</g>
+<g >
+<title>std::__detail::_Hash_code_base&lt;PageId, (1 samples, 0.63%)</title><rect x="1026.7" y="341" width="7.5" height="15.0" fill="rgb(216,193,8)" rx="2" ry="2" />
+<text  x="1029.73" y="351.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;PageIdAndRank,std::allocator&lt;PageIdAndRank&gt; (1 samples, 0.63%)</title><rect x="989.6" y="405" width="7.4" height="15.0" fill="rgb(218,63,38)" rx="2" ry="2" />
+<text  x="992.62" y="415.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="121.3" y="293" width="7.4" height="15.0" fill="rgb(227,42,38)" rx="2" ry="2" />
+<text  x="124.32" y="303.5" ></text>
+</g>
+<g >
+<title>_int_malloc(av=av@entry=0x7f8b20000020, (1 samples, 0.63%)</title><rect x="39.7" y="197" width="7.4" height="15.0" fill="rgb(253,100,7)" rx="2" ry="2" />
+<text  x="42.69" y="207.5" ></text>
+</g>
+<g >
+<title>operatornew(unsigned (1 samples, 0.63%)</title><rect x="84.2" y="229" width="7.4" height="15.0" fill="rgb(236,11,5)" rx="2" ry="2" />
+<text  x="87.21" y="239.5" ></text>
+</g>
+<g >
+<title>std::call_once&lt;void (7 samples, 4.40%)</title><rect x="1049.0" y="341" width="51.9" height="15.0" fill="rgb(232,56,38)" rx="2" ry="2" />
+<text  x="1051.99" y="351.5" >std::..</text>
+</g>
+<g >
+<title>__gthread_mutex_lock(__mutex=0x55bdc58e95a0) (1 samples, 0.63%)</title><rect x="128.7" y="85" width="7.5" height="15.0" fill="rgb(253,2,41)" rx="2" ry="2" />
+<text  x="131.74" y="95.5" ></text>
+</g>
+<g >
+<title>std::__invoke&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 8.81%)</title><rect x="440.4" y="181" width="103.9" height="15.0" fill="rgb(246,124,40)" rx="2" ry="2" />
+<text  x="443.44" y="191.5" >std::__invok..</text>
+</g>
+<g >
+<title>_int_malloc(av=av@entry=0x7f8b1c000020, (1 samples, 0.63%)</title><rect x="121.3" y="197" width="7.4" height="15.0" fill="rgb(236,86,15)" rx="2" ry="2" />
+<text  x="124.32" y="207.5" ></text>
+</g>
+<g >
+<title>std::__invoke&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 8.81%)</title><rect x="232.6" y="181" width="103.9" height="15.0" fill="rgb(249,35,38)" rx="2" ry="2" />
+<text  x="235.64" y="191.5" >std::__invok..</text>
+</g>
+<g >
+<title>operatornew(unsigned (1 samples, 0.63%)</title><rect x="76.8" y="229" width="7.4" height="15.0" fill="rgb(250,194,48)" rx="2" ry="2" />
+<text  x="79.79" y="239.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::AtomicIterator&lt;std::__detail::_Node_iterator&lt;std::pair&lt;PageIdconst, (12 samples, 7.55%)</title><rect x="856.0" y="133" width="89.1" height="15.0" fill="rgb(231,187,49)" rx="2" ry="2" />
+<text  x="859.04" y="143.5" >MultiThrea..</text>
+</g>
+<g >
+<title>std::unordered_map&lt;PageId, (1 samples, 0.63%)</title><rect x="529.5" y="133" width="7.4" height="15.0" fill="rgb(239,77,33)" rx="2" ry="2" />
+<text  x="532.50" y="143.5" ></text>
+</g>
+<g >
+<title>operatornew(unsigned (1 samples, 0.63%)</title><rect x="17.4" y="229" width="7.4" height="15.0" fill="rgb(225,96,26)" rx="2" ry="2" />
+<text  x="20.42" y="239.5" ></text>
+</g>
+<g >
+<title>Page::generateId(this=0x7f8b3cdfa170, (1 samples, 0.63%)</title><rect x="61.9" y="341" width="7.5" height="15.0" fill="rgb(225,81,15)" rx="2" ry="2" />
+<text  x="64.95" y="351.5" ></text>
+</g>
+<g >
+<title>sysmalloc (1 samples, 0.63%)</title><rect x="99.1" y="181" width="7.4" height="15.0" fill="rgb(217,218,50)" rx="2" ry="2" />
+<text  x="102.06" y="191.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::AtomicIterator&lt;std::__detail::_Node_iterator&lt;std::pair&lt;PageIdconst, (11 samples, 6.92%)</title><rect x="247.5" y="133" width="81.6" height="15.0" fill="rgb(228,28,0)" rx="2" ry="2" />
+<text  x="250.48" y="143.5" >MultiThre..</text>
+</g>
+<g >
+<title>std::__future_base::_State_baseV2::_M_do_set(std::function&lt;std::unique_ptr&lt;std::__future_base::_Result_base, (14 samples, 8.81%)</title><rect x="336.5" y="277" width="103.9" height="15.0" fill="rgb(229,40,33)" rx="2" ry="2" />
+<text  x="339.54" y="287.5" >std::__futur..</text>
+</g>
+<g >
+<title>sysmalloc (1 samples, 0.63%)</title><rect x="39.7" y="181" width="7.4" height="15.0" fill="rgb(218,154,14)" rx="2" ry="2" />
+<text  x="42.69" y="191.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="69.4" y="261" width="7.4" height="15.0" fill="rgb(251,170,49)" rx="2" ry="2" />
+<text  x="72.37" y="271.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="54.5" y="277" width="7.4" height="15.0" fill="rgb(243,195,46)" rx="2" ry="2" />
+<text  x="57.53" y="287.5" ></text>
+</g>
+<g >
+<title>operatornew(unsigned (2 samples, 1.26%)</title><rect x="1011.9" y="341" width="14.8" height="15.0" fill="rgb(222,88,45)" rx="2" ry="2" />
+<text  x="1014.89" y="351.5" ></text>
+</g>
+<g >
+<title>std::__detail::_Map_base&lt;PageId, (4 samples, 2.52%)</title><rect x="997.0" y="405" width="29.7" height="15.0" fill="rgb(232,88,25)" rx="2" ry="2" />
+<text  x="1000.04" y="415.5" >st..</text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="61.9" y="277" width="7.5" height="15.0" fill="rgb(239,211,15)" rx="2" ry="2" />
+<text  x="64.95" y="287.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::generatePageIds (2 samples, 1.26%)</title><rect x="959.9" y="437" width="14.9" height="15.0" fill="rgb(233,13,25)" rx="2" ry="2" />
+<text  x="962.94" y="447.5" ></text>
+</g>
+<g >
+<title>std::allocator_traits&lt;std::allocator&lt;std::__detail::_Hash_node&lt;std::pair&lt;PageId (1 samples, 0.63%)</title><rect x="1175.2" y="357" width="7.4" height="15.0" fill="rgb(226,208,53)" rx="2" ry="2" />
+<text  x="1178.16" y="367.5" ></text>
+</g>
+<g >
+<title>std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 8.81%)</title><rect x="440.4" y="213" width="103.9" height="15.0" fill="rgb(211,20,19)" rx="2" ry="2" />
+<text  x="443.44" y="223.5" >std::thread:..</text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;,std::unordered_map&lt;PageId, (1 samples, 0.63%)</title><rect x="536.9" y="149" width="7.4" height="15.0" fill="rgb(224,164,52)" rx="2" ry="2" />
+<text  x="539.92" y="159.5" ></text>
+</g>
+<g >
+<title>__GI___pthread_mutex_lock(mutex=0x55bdc58e95a0) (1 samples, 0.63%)</title><rect x="128.7" y="69" width="7.5" height="15.0" fill="rgb(219,171,25)" rx="2" ry="2" />
+<text  x="131.74" y="79.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="1175.2" y="293" width="7.4" height="15.0" fill="rgb(212,184,49)" rx="2" ry="2" />
+<text  x="1178.16" y="303.5" ></text>
+</g>
+<g >
+<title>std::__future_base::_State_baseV2::_M_do_set(std::function&lt;std::unique_ptr&lt;std::__future_base::_Result_base, (14 samples, 8.81%)</title><rect x="440.4" y="277" width="103.9" height="15.0" fill="rgb(215,185,29)" rx="2" ry="2" />
+<text  x="443.44" y="287.5" >std::__futur..</text>
+</g>
+<g >
+<title>std::__invoke&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 8.81%)</title><rect x="856.0" y="181" width="103.9" height="15.0" fill="rgb(224,202,21)" rx="2" ry="2" />
+<text  x="859.04" y="191.5" >std::__invok..</text>
+</g>
+<g >
+<title>std::mutex::unlock (2 samples, 1.26%)</title><rect x="752.1" y="101" width="14.9" height="15.0" fill="rgb(227,147,45)" rx="2" ry="2" />
+<text  x="755.14" y="111.5" ></text>
+</g>
+<g >
+<title>std::__uninitialized_copy&lt;false&gt;::__uninit_copy&lt;std::move_iterator&lt;PageIdAndRank*&gt;, (1 samples, 0.63%)</title><rect x="989.6" y="325" width="7.4" height="15.0" fill="rgb(214,215,0)" rx="2" ry="2" />
+<text  x="992.62" y="335.5" ></text>
+</g>
+<g >
+<title>operatornew(unsigned (1 samples, 0.63%)</title><rect x="32.3" y="229" width="7.4" height="15.0" fill="rgb(228,145,43)" rx="2" ry="2" />
+<text  x="35.26" y="239.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="76.8" y="293" width="7.4" height="15.0" fill="rgb(246,224,35)" rx="2" ry="2" />
+<text  x="79.79" y="303.5" ></text>
+</g>
+<g >
+<title>std::_Vector_base&lt;PageId, (1 samples, 0.63%)</title><rect x="1182.6" y="341" width="7.4" height="15.0" fill="rgb(220,109,36)" rx="2" ry="2" />
+<text  x="1185.58" y="351.5" ></text>
+</g>
+<g >
+<title>__GI___libc_malloc(bytes=65) (1 samples, 0.63%)</title><rect x="69.4" y="213" width="7.4" height="15.0" fill="rgb(212,183,18)" rx="2" ry="2" />
+<text  x="72.37" y="223.5" ></text>
+</g>
+<g >
+<title>std::_Hashtable&lt;PageId, (2 samples, 1.26%)</title><rect x="997.0" y="373" width="14.9" height="15.0" fill="rgb(244,211,15)" rx="2" ry="2" />
+<text  x="1000.04" y="383.5" ></text>
+</g>
+<g >
+<title>__GI___libc_malloc(bytes=65) (1 samples, 0.63%)</title><rect x="113.9" y="213" width="7.4" height="15.0" fill="rgb(231,113,9)" rx="2" ry="2" />
+<text  x="116.90" y="223.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::AtomicIterator&lt;std::__detail::_Node_iterator&lt;std::pair&lt;PageId (2 samples, 1.26%)</title><rect x="752.1" y="133" width="14.9" height="15.0" fill="rgb(226,198,14)" rx="2" ry="2" />
+<text  x="755.14" y="143.5" ></text>
+</g>
+<g >
+<title>SimpleIdGenerator::generateId (1 samples, 0.63%)</title><rect x="91.6" y="325" width="7.5" height="15.0" fill="rgb(236,214,21)" rx="2" ry="2" />
+<text  x="94.64" y="335.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::AtomicIterator&lt;std::__detail::_Node_iterator&lt;std::pair&lt;PageIdconst, (11 samples, 6.92%)</title><rect x="143.6" y="133" width="81.6" height="15.0" fill="rgb(235,74,16)" rx="2" ry="2" />
+<text  x="146.58" y="143.5" >MultiThre..</text>
+</g>
+<g >
+<title>__pthread_once_slow(once_control=0x55bdc58e9798, (14 samples, 8.81%)</title><rect x="128.7" y="293" width="103.9" height="15.0" fill="rgb(221,42,53)" rx="2" ry="2" />
+<text  x="131.74" y="303.5" >__pthread_on..</text>
+</g>
+<g >
+<title>SimpleIdGenerator::generateId (1 samples, 0.63%)</title><rect x="32.3" y="325" width="7.4" height="15.0" fill="rgb(247,70,44)" rx="2" ry="2" />
+<text  x="35.26" y="335.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="121.3" y="277" width="7.4" height="15.0" fill="rgb(208,119,1)" rx="2" ry="2" />
+<text  x="124.32" y="287.5" ></text>
+</g>
+<g >
+<title>std::_Function_handler&lt;std::unique_ptr&lt;std::__future_base::_Result_base, (14 samples, 8.81%)</title><rect x="128.7" y="245" width="103.9" height="15.0" fill="rgb(249,37,18)" rx="2" ry="2" />
+<text  x="131.74" y="255.5" >std::_Functi..</text>
+</g>
+<g >
+<title>__gthread_mutex_lock(__mutex=0x55bdc58e96b8) (2 samples, 1.26%)</title><rect x="648.2" y="85" width="14.9" height="15.0" fill="rgb(244,150,39)" rx="2" ry="2" />
+<text  x="651.24" y="95.5" ></text>
+</g>
+<g >
+<title>__memmove_avx_unaligned_erms (1 samples, 0.63%)</title><rect x="982.2" y="261" width="7.4" height="15.0" fill="rgb(205,201,34)" rx="2" ry="2" />
+<text  x="985.20" y="271.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::AtomicIterator&lt;std::__detail::_Node_iterator&lt;std::pair&lt;PageId (1 samples, 0.63%)</title><rect x="336.5" y="133" width="7.5" height="15.0" fill="rgb(214,220,26)" rx="2" ry="2" />
+<text  x="339.54" y="143.5" ></text>
+</g>
+<g >
+<title>std::operator==&lt;char&gt; (1 samples, 0.63%)</title><rect x="1004.5" y="293" width="7.4" height="15.0" fill="rgb(244,105,54)" rx="2" ry="2" />
+<text  x="1007.47" y="303.5" ></text>
+</g>
+<g >
+<title>__pthread_mutex_unlock_usercnt(mutex=0x55bdc58e95a0, (1 samples, 0.63%)</title><rect x="752.1" y="69" width="7.5" height="15.0" fill="rgb(208,117,15)" rx="2" ry="2" />
+<text  x="755.14" y="79.5" ></text>
+</g>
+<g >
+<title>__GI___libc_malloc(bytes=65) (1 samples, 0.63%)</title><rect x="32.3" y="213" width="7.4" height="15.0" fill="rgb(207,210,12)" rx="2" ry="2" />
+<text  x="35.26" y="223.5" ></text>
+</g>
+<g >
+<title>__GI___pthread_mutex_lock(mutex=0x55bdc58e9610) (1 samples, 0.63%)</title><rect x="336.5" y="69" width="7.5" height="15.0" fill="rgb(229,108,23)" rx="2" ry="2" />
+<text  x="339.54" y="79.5" ></text>
+</g>
+<g >
+<title>__pthread_mutex_unlock_usercnt(mutex=0x55bdc58e96f0, (1 samples, 0.63%)</title><rect x="759.6" y="69" width="7.4" height="15.0" fill="rgb(241,223,25)" rx="2" ry="2" />
+<text  x="762.56" y="79.5" ></text>
+</g>
+<g >
+<title>std::lock_guard&lt;std::mutex&gt;::lock_guard (1 samples, 0.63%)</title><rect x="128.7" y="117" width="7.5" height="15.0" fill="rgb(241,35,25)" rx="2" ry="2" />
+<text  x="131.74" y="127.5" ></text>
+</g>
+<g >
+<title>__pthread_once_slow(once_control=0x55bdc58e9a68, (14 samples, 8.81%)</title><rect x="544.3" y="293" width="103.9" height="15.0" fill="rgb(240,146,53)" rx="2" ry="2" />
+<text  x="547.34" y="303.5" >__pthread_on..</text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char,std::char_traits&lt;char&gt;, (1 samples, 0.63%)</title><rect x="84.2" y="245" width="7.4" height="15.0" fill="rgb(221,106,51)" rx="2" ry="2" />
+<text  x="87.21" y="255.5" ></text>
+</g>
+<g >
+<title>std::_Function_handler&lt;std::unique_ptr&lt;std::__future_base::_Result_base, (14 samples, 8.81%)</title><rect x="440.4" y="245" width="103.9" height="15.0" fill="rgb(225,163,6)" rx="2" ry="2" />
+<text  x="443.44" y="255.5" >std::_Functi..</text>
+</g>
+<g >
+<title>__pthread_once_slow(once_control=0x55bdc58e9c38, (14 samples, 8.81%)</title><rect x="648.2" y="293" width="103.9" height="15.0" fill="rgb(242,94,6)" rx="2" ry="2" />
+<text  x="651.24" y="303.5" >__pthread_on..</text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="99.1" y="293" width="7.4" height="15.0" fill="rgb(225,21,8)" rx="2" ry="2" />
+<text  x="102.06" y="303.5" ></text>
+</g>
+<g >
+<title>std::operator+&lt;char, (1 samples, 0.63%)</title><rect x="47.1" y="309" width="7.4" height="15.0" fill="rgb(233,213,13)" rx="2" ry="2" />
+<text  x="50.11" y="319.5" ></text>
+</g>
+<g >
+<title>std::thread::_Invoker&lt;std::tuple&lt;std::__future_base::_Async_state_impl&lt;std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (112 samples, 70.44%)</title><rect x="128.7" y="405" width="831.2" height="15.0" fill="rgb(235,116,19)" rx="2" ry="2" />
+<text  x="131.74" y="415.5" >std::thread::_Invoker&lt;std::tuple&lt;std::__future_base::_Async_state_impl&lt;std::thread::_Invoker&lt;std::tuple&lt;MultiThread..</text>
+</g>
+<g >
+<title>std::lock_guard&lt;std::mutex&gt;::lock_guard (1 samples, 0.63%)</title><rect x="440.4" y="117" width="7.5" height="15.0" fill="rgb(244,67,7)" rx="2" ry="2" />
+<text  x="443.44" y="127.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char,std::char_traits&lt;char&gt;, (1 samples, 0.63%)</title><rect x="1004.5" y="277" width="7.4" height="15.0" fill="rgb(250,27,28)" rx="2" ry="2" />
+<text  x="1007.47" y="287.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="974.8" y="357" width="7.4" height="15.0" fill="rgb(231,113,40)" rx="2" ry="2" />
+<text  x="977.78" y="367.5" ></text>
+</g>
+<g >
+<title>std::__detail::_Map_base&lt;PageId, (1 samples, 0.63%)</title><rect x="529.5" y="117" width="7.4" height="15.0" fill="rgb(250,203,3)" rx="2" ry="2" />
+<text  x="532.50" y="127.5" ></text>
+</g>
+<g >
+<title>Page::generateId(this=0x7f8b3cdf73b0, (1 samples, 0.63%)</title><rect x="39.7" y="341" width="7.4" height="15.0" fill="rgb(207,87,18)" rx="2" ry="2" />
+<text  x="42.69" y="351.5" ></text>
+</g>
+<g >
+<title>_int_free(av=0x7f8b42d26c40 (3 samples, 1.89%)</title><rect x="1152.9" y="325" width="22.3" height="15.0" fill="rgb(205,115,19)" rx="2" ry="2" />
+<text  x="1155.89" y="335.5" >_..</text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="17.4" y="293" width="7.4" height="15.0" fill="rgb(234,78,1)" rx="2" ry="2" />
+<text  x="20.42" y="303.5" ></text>
+</g>
+<g >
+<title>grow_heap(diff=4096, (1 samples, 0.63%)</title><rect x="99.1" y="165" width="7.4" height="15.0" fill="rgb(218,172,21)" rx="2" ry="2" />
+<text  x="102.06" y="175.5" ></text>
+</g>
+<g >
+<title>Page::generateId(this=0x7f8b3f0466f0, (1 samples, 0.63%)</title><rect x="91.6" y="341" width="7.5" height="15.0" fill="rgb(237,1,2)" rx="2" ry="2" />
+<text  x="94.64" y="351.5" ></text>
+</g>
+<g >
+<title>operatornew(unsigned (1 samples, 0.63%)</title><rect x="91.6" y="229" width="7.5" height="15.0" fill="rgb(241,115,16)" rx="2" ry="2" />
+<text  x="94.64" y="239.5" ></text>
+</g>
+<g >
+<title>std::__future_base::_State_baseV2::_M_do_set(std::function&lt;std::unique_ptr&lt;std::__future_base::_Result_base, (14 samples, 8.81%)</title><rect x="232.6" y="277" width="103.9" height="15.0" fill="rgb(222,201,4)" rx="2" ry="2" />
+<text  x="235.64" y="287.5" >std::__futur..</text>
+</g>
+<g >
+<title>PageId::PageId (1 samples, 0.63%)</title><rect x="989.6" y="277" width="7.4" height="15.0" fill="rgb(209,61,17)" rx="2" ry="2" />
+<text  x="992.62" y="287.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char,std::char_traits&lt;char&gt;, (1 samples, 0.63%)</title><rect x="39.7" y="245" width="7.4" height="15.0" fill="rgb(253,125,12)" rx="2" ry="2" />
+<text  x="42.69" y="255.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="989.6" y="245" width="7.4" height="15.0" fill="rgb(215,146,50)" rx="2" ry="2" />
+<text  x="992.62" y="255.5" ></text>
+</g>
+<g >
+<title>std::_Hash_bytes(voidconst*, (1 samples, 0.63%)</title><rect x="433.0" y="37" width="7.4" height="15.0" fill="rgb(239,90,42)" rx="2" ry="2" />
+<text  x="436.02" y="47.5" ></text>
+</g>
+<g >
+<title>__gnu_cxx::new_allocator&lt;std::__detail::_Hash_node&lt;std::pair&lt;PageIdconst, (2 samples, 1.26%)</title><rect x="1011.9" y="357" width="14.8" height="15.0" fill="rgb(215,179,40)" rx="2" ry="2" />
+<text  x="1014.89" y="367.5" ></text>
+</g>
+<g >
+<title>clone() (128 samples, 80.50%)</title><rect x="10.0" y="485" width="949.9" height="15.0" fill="rgb(224,136,48)" rx="2" ry="2" />
+<text  x="13.00" y="495.5" >clone()</text>
+</g>
+<g >
+<title>??() (128 samples, 80.50%)</title><rect x="10.0" y="453" width="949.9" height="15.0" fill="rgb(212,114,16)" rx="2" ry="2" />
+<text  x="13.00" y="463.5" >??()</text>
+</g>
+<g >
+<title>operatornew(unsigned (1 samples, 0.63%)</title><rect x="106.5" y="229" width="7.4" height="15.0" fill="rgb(236,173,33)" rx="2" ry="2" />
+<text  x="109.48" y="239.5" ></text>
+</g>
+<g >
+<title>std::__basic_future&lt;std::pair&lt;double, (14 samples, 8.81%)</title><rect x="1049.0" y="405" width="103.9" height="15.0" fill="rgb(249,14,5)" rx="2" ry="2" />
+<text  x="1051.99" y="415.5" >std::__basic..</text>
+</g>
+<g >
+<title>mprotect() (1 samples, 0.63%)</title><rect x="69.4" y="149" width="7.4" height="15.0" fill="rgb(240,182,40)" rx="2" ry="2" />
+<text  x="72.37" y="159.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="91.6" y="293" width="7.5" height="15.0" fill="rgb(245,158,50)" rx="2" ry="2" />
+<text  x="94.64" y="303.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::AtomicIterator&lt;std::__detail::_Node_iterator&lt;std::pair&lt;PageId (2 samples, 1.26%)</title><rect x="232.6" y="133" width="14.9" height="15.0" fill="rgb(237,76,39)" rx="2" ry="2" />
+<text  x="235.64" y="143.5" ></text>
+</g>
+<g >
+<title>sysmalloc (1 samples, 0.63%)</title><rect x="106.5" y="181" width="7.4" height="15.0" fill="rgb(252,49,43)" rx="2" ry="2" />
+<text  x="109.48" y="191.5" ></text>
+</g>
+<g >
+<title>std::lock_guard&lt;std::mutex&gt;::lock_guard (1 samples, 0.63%)</title><rect x="232.6" y="117" width="7.5" height="15.0" fill="rgb(219,43,21)" rx="2" ry="2" />
+<text  x="235.64" y="127.5" ></text>
+</g>
+<g >
+<title>PageId::operator== (1 samples, 0.63%)</title><rect x="1004.5" y="309" width="7.4" height="15.0" fill="rgb(239,162,13)" rx="2" ry="2" />
+<text  x="1007.47" y="319.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char,std::char_traits&lt;char&gt;, (1 samples, 0.63%)</title><rect x="69.4" y="245" width="7.4" height="15.0" fill="rgb(229,99,52)" rx="2" ry="2" />
+<text  x="72.37" y="255.5" ></text>
+</g>
+<g >
+<title>std::lock_guard&lt;std::mutex&gt;::~lock_guard (1 samples, 0.63%)</title><rect x="544.3" y="117" width="7.5" height="15.0" fill="rgb(228,48,50)" rx="2" ry="2" />
+<text  x="547.34" y="127.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="47.1" y="261" width="7.4" height="15.0" fill="rgb(238,164,40)" rx="2" ry="2" />
+<text  x="50.11" y="271.5" ></text>
+</g>
+<g >
+<title>__pthread_once_slow(once_control=0x55bdc58e97a8, (7 samples, 4.40%)</title><rect x="1049.0" y="309" width="51.9" height="15.0" fill="rgb(230,223,47)" rx="2" ry="2" />
+<text  x="1051.99" y="319.5" >__pth..</text>
+</g>
+<g >
+<title>std::__future_base::_Async_state_commonV2::_M_join (7 samples, 4.40%)</title><rect x="1100.9" y="357" width="52.0" height="15.0" fill="rgb(232,96,5)" rx="2" ry="2" />
+<text  x="1103.94" y="367.5" >std::..</text>
+</g>
+<g >
+<title>std::_Function_handler&lt;std::unique_ptr&lt;std::__future_base::_Result_base, (14 samples, 8.81%)</title><rect x="648.2" y="245" width="103.9" height="15.0" fill="rgb(236,98,8)" rx="2" ry="2" />
+<text  x="651.24" y="255.5" >std::_Functi..</text>
+</g>
+<g >
+<title>std::__invoke&lt;MultiThreadedPageRankComputer::generatePageIds(MultiThreadedPageRankComputer::Pool&amp;, (16 samples, 10.06%)</title><rect x="10.0" y="389" width="118.7" height="15.0" fill="rgb(235,181,20)" rx="2" ry="2" />
+<text  x="13.00" y="399.5" >std::__invoke&lt;..</text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;,std::unordered_map&lt;PageId, (1 samples, 0.63%)</title><rect x="640.8" y="149" width="7.4" height="15.0" fill="rgb(210,48,0)" rx="2" ry="2" />
+<text  x="643.82" y="159.5" ></text>
+</g>
+<g >
+<title>operatornew(unsigned (1 samples, 0.63%)</title><rect x="69.4" y="229" width="7.4" height="15.0" fill="rgb(211,135,49)" rx="2" ry="2" />
+<text  x="72.37" y="239.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::AtomicIterator&lt;std::__detail::_Node_iterator&lt;std::pair&lt;PageIdconst, (12 samples, 7.55%)</title><rect x="551.8" y="133" width="89.0" height="15.0" fill="rgb(217,141,10)" rx="2" ry="2" />
+<text  x="554.76" y="143.5" >MultiThrea..</text>
+</g>
+<g >
+<title>PageId::PageId (1 samples, 0.63%)</title><rect x="982.2" y="405" width="7.4" height="15.0" fill="rgb(235,100,37)" rx="2" ry="2" />
+<text  x="985.20" y="415.5" ></text>
+</g>
+<g >
+<title>__GI___libc_malloc(bytes=65) (1 samples, 0.63%)</title><rect x="106.5" y="213" width="7.4" height="15.0" fill="rgb(234,165,50)" rx="2" ry="2" />
+<text  x="109.48" y="223.5" ></text>
+</g>
+<g >
+<title>std::__detail::_Hash_code_base&lt;PageId, (1 samples, 0.63%)</title><rect x="425.6" y="85" width="7.4" height="15.0" fill="rgb(222,186,53)" rx="2" ry="2" />
+<text  x="428.60" y="95.5" ></text>
+</g>
+<g >
+<title>sysmalloc (1 samples, 0.63%)</title><rect x="69.4" y="181" width="7.4" height="15.0" fill="rgb(223,73,16)" rx="2" ry="2" />
+<text  x="72.37" y="191.5" ></text>
+</g>
+<g >
+<title>Page::generateId(this=0x7f8b3cdf8e50, (1 samples, 0.63%)</title><rect x="54.5" y="341" width="7.4" height="15.0" fill="rgb(222,107,50)" rx="2" ry="2" />
+<text  x="57.53" y="351.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char,std::char_traits&lt;char&gt;, (1 samples, 0.63%)</title><rect x="32.3" y="245" width="7.4" height="15.0" fill="rgb(253,226,48)" rx="2" ry="2" />
+<text  x="35.26" y="255.5" ></text>
+</g>
+<g >
+<title>Page::generateId(this=0x7f8b3cdf75f0, (1 samples, 0.63%)</title><rect x="47.1" y="341" width="7.4" height="15.0" fill="rgb(211,206,34)" rx="2" ry="2" />
+<text  x="50.11" y="351.5" ></text>
+</g>
+<g >
+<title>_int_malloc (1 samples, 0.63%)</title><rect x="84.2" y="197" width="7.4" height="15.0" fill="rgb(252,195,52)" rx="2" ry="2" />
+<text  x="87.21" y="207.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 8.81%)</title><rect x="336.5" y="149" width="103.9" height="15.0" fill="rgb(242,197,29)" rx="2" ry="2" />
+<text  x="339.54" y="159.5" >MultiThreade..</text>
+</g>
+<g >
+<title>std::__future_base::_State_baseV2::_M_do_set(std::function&lt;std::unique_ptr&lt;std::__future_base::_Result_base, (14 samples, 8.81%)</title><rect x="856.0" y="277" width="103.9" height="15.0" fill="rgb(217,179,43)" rx="2" ry="2" />
+<text  x="859.04" y="287.5" >std::__futur..</text>
+</g>
+<g >
+<title>SimpleIdGenerator::generateId (1 samples, 0.63%)</title><rect x="76.8" y="325" width="7.4" height="15.0" fill="rgb(242,176,14)" rx="2" ry="2" />
+<text  x="79.79" y="335.5" ></text>
+</g>
+<g >
+<title>std::lock_guard&lt;std::mutex&gt;::~lock_guard (2 samples, 1.26%)</title><rect x="663.1" y="117" width="14.8" height="15.0" fill="rgb(213,91,12)" rx="2" ry="2" />
+<text  x="666.08" y="127.5" ></text>
+</g>
+<g >
+<title>__gnu_cxx::new_allocator&lt;std::__detail::_Hash_node&lt;std::pair&lt;PageId (1 samples, 0.63%)</title><rect x="1175.2" y="341" width="7.4" height="15.0" fill="rgb(237,26,21)" rx="2" ry="2" />
+<text  x="1178.16" y="351.5" ></text>
+</g>
+<g >
+<title>_int_malloc(av=av@entry=0x7f8b24000020, (1 samples, 0.63%)</title><rect x="76.8" y="197" width="7.4" height="15.0" fill="rgb(235,187,9)" rx="2" ry="2" />
+<text  x="79.79" y="207.5" ></text>
+</g>
+<g >
+<title>std::operator+&lt;char, (1 samples, 0.63%)</title><rect x="84.2" y="309" width="7.4" height="15.0" fill="rgb(233,155,38)" rx="2" ry="2" />
+<text  x="87.21" y="319.5" ></text>
+</g>
+<g >
+<title>std::__uninitialized_copy_a&lt;std::move_iterator&lt;PageIdAndRank*&gt;, (1 samples, 0.63%)</title><rect x="989.6" y="357" width="7.4" height="15.0" fill="rgb(229,67,3)" rx="2" ry="2" />
+<text  x="992.62" y="367.5" ></text>
+</g>
+<g >
+<title>std::_Vector_base&lt;PageId, (1 samples, 0.63%)</title><rect x="1182.6" y="325" width="7.4" height="15.0" fill="rgb(212,123,4)" rx="2" ry="2" />
+<text  x="1185.58" y="335.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char,std::char_traits&lt;char&gt;, (1 samples, 0.63%)</title><rect x="91.6" y="245" width="7.5" height="15.0" fill="rgb(220,130,41)" rx="2" ry="2" />
+<text  x="94.64" y="255.5" ></text>
+</g>
+<g >
+<title>Page::generateId(this=0x7f8b3f043f90, (1 samples, 0.63%)</title><rect x="76.8" y="341" width="7.4" height="15.0" fill="rgb(222,226,1)" rx="2" ry="2" />
+<text  x="79.79" y="351.5" ></text>
+</g>
+<g >
+<title>_int_malloc(av=av@entry=0x7f8b28000020, (1 samples, 0.63%)</title><rect x="54.5" y="197" width="7.4" height="15.0" fill="rgb(216,49,50)" rx="2" ry="2" />
+<text  x="57.53" y="207.5" ></text>
+</g>
+<g >
+<title>std::lock_guard&lt;std::mutex&gt;::~lock_guard (1 samples, 0.63%)</title><rect x="240.1" y="117" width="7.4" height="15.0" fill="rgb(244,175,51)" rx="2" ry="2" />
+<text  x="243.06" y="127.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;Page, (1 samples, 0.63%)</title><rect x="1182.6" y="421" width="7.4" height="15.0" fill="rgb(219,103,37)" rx="2" ry="2" />
+<text  x="1185.58" y="431.5" ></text>
+</g>
+<g >
+<title>std::mutex::lock (2 samples, 1.26%)</title><rect x="648.2" y="101" width="14.9" height="15.0" fill="rgb(253,131,32)" rx="2" ry="2" />
+<text  x="651.24" y="111.5" ></text>
+</g>
+<g >
+<title>operatornew(unsigned (1 samples, 0.63%)</title><rect x="54.5" y="229" width="7.4" height="15.0" fill="rgb(223,181,17)" rx="2" ry="2" />
+<text  x="57.53" y="239.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="982.2" y="389" width="7.4" height="15.0" fill="rgb(239,3,26)" rx="2" ry="2" />
+<text  x="985.20" y="399.5" ></text>
+</g>
+<g >
+<title>std::__future_base::_Task_setter&lt;std::unique_ptr&lt;std::__future_base::_Result&lt;std::pair&lt;double, (14 samples, 8.81%)</title><rect x="856.0" y="229" width="103.9" height="15.0" fill="rgb(220,226,17)" rx="2" ry="2" />
+<text  x="859.04" y="239.5" >std::__futur..</text>
+</g>
+<g >
+<title>SimpleIdGenerator::generateId (1 samples, 0.63%)</title><rect x="39.7" y="325" width="7.4" height="15.0" fill="rgb(223,213,46)" rx="2" ry="2" />
+<text  x="42.69" y="335.5" ></text>
+</g>
+<g >
+<title>Page::generateId(this=0x7f8b3f045430, (1 samples, 0.63%)</title><rect x="84.2" y="341" width="7.4" height="15.0" fill="rgb(247,77,44)" rx="2" ry="2" />
+<text  x="87.21" y="351.5" ></text>
+</g>
+<g >
+<title>std::__detail::_Hashtable_alloc&lt;std::allocator&lt;std::__detail::_Hash_node&lt;std::pair&lt;PageId (2 samples, 1.26%)</title><rect x="1011.9" y="389" width="14.8" height="15.0" fill="rgb(220,40,30)" rx="2" ry="2" />
+<text  x="1014.89" y="399.5" ></text>
+</g>
+<g >
+<title>mprotect() (1 samples, 0.63%)</title><rect x="47.1" y="149" width="7.4" height="15.0" fill="rgb(250,108,5)" rx="2" ry="2" />
+<text  x="50.11" y="159.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;,std::unordered_map&lt;PageId, (2 samples, 1.26%)</title><rect x="945.1" y="149" width="14.8" height="15.0" fill="rgb(243,71,25)" rx="2" ry="2" />
+<text  x="948.09" y="159.5" ></text>
+</g>
+<g >
+<title>std::function&lt;std::unique_ptr&lt;std::__future_base::_Result_base,std::__future_base::_Result_base::_Deleter&gt; (14 samples, 8.81%)</title><rect x="232.6" y="261" width="103.9" height="15.0" fill="rgb(238,50,19)" rx="2" ry="2" />
+<text  x="235.64" y="271.5" >std::functio..</text>
+</g>
+<g >
+<title>grow_heap(diff=4096, (1 samples, 0.63%)</title><rect x="24.8" y="165" width="7.5" height="15.0" fill="rgb(225,180,36)" rx="2" ry="2" />
+<text  x="27.84" y="175.5" ></text>
+</g>
+<g >
+<title>std::__invoke_impl&lt;void, (112 samples, 70.44%)</title><rect x="128.7" y="373" width="831.2" height="15.0" fill="rgb(242,145,22)" rx="2" ry="2" />
+<text  x="131.74" y="383.5" >std::__invoke_impl&lt;void,</text>
+</g>
+<g >
+<title>std::mutex::lock (1 samples, 0.63%)</title><rect x="232.6" y="101" width="7.5" height="15.0" fill="rgb(244,72,15)" rx="2" ry="2" />
+<text  x="235.64" y="111.5" ></text>
+</g>
+<g >
+<title>std::__future_base::_Task_setter&lt;std::unique_ptr&lt;std::__future_base::_Result&lt;std::pair&lt;double, (14 samples, 8.81%)</title><rect x="440.4" y="229" width="103.9" height="15.0" fill="rgb(230,120,15)" rx="2" ry="2" />
+<text  x="443.44" y="239.5" >std::__futur..</text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char,std::char_traits&lt;char&gt;, (1 samples, 0.63%)</title><rect x="113.9" y="245" width="7.4" height="15.0" fill="rgb(231,28,27)" rx="2" ry="2" />
+<text  x="116.90" y="255.5" ></text>
+</g>
+<g >
+<title>std::operator+&lt;char, (1 samples, 0.63%)</title><rect x="24.8" y="309" width="7.5" height="15.0" fill="rgb(253,17,18)" rx="2" ry="2" />
+<text  x="27.84" y="319.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char,std::char_traits&lt;char&gt;, (1 samples, 0.63%)</title><rect x="99.1" y="245" width="7.4" height="15.0" fill="rgb(250,96,39)" rx="2" ry="2" />
+<text  x="102.06" y="255.5" ></text>
+</g>
+<g >
+<title>std::__invoke_impl&lt;std::pair&lt;double, (14 samples, 8.81%)</title><rect x="544.3" y="165" width="103.9" height="15.0" fill="rgb(229,103,41)" rx="2" ry="2" />
+<text  x="547.34" y="175.5" >std::__invok..</text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="1175.2" y="261" width="7.4" height="15.0" fill="rgb(221,177,41)" rx="2" ry="2" />
+<text  x="1178.16" y="271.5" ></text>
+</g>
+<g >
+<title>mprotect() (1 samples, 0.63%)</title><rect x="54.5" y="149" width="7.4" height="15.0" fill="rgb(217,126,10)" rx="2" ry="2" />
+<text  x="57.53" y="159.5" ></text>
+</g>
+<g >
+<title>std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 8.81%)</title><rect x="128.7" y="213" width="103.9" height="15.0" fill="rgb(218,113,23)" rx="2" ry="2" />
+<text  x="131.74" y="223.5" >std::thread:..</text>
+</g>
+<g >
+<title>SimpleIdGenerator::generateId (1 samples, 0.63%)</title><rect x="106.5" y="325" width="7.4" height="15.0" fill="rgb(223,41,19)" rx="2" ry="2" />
+<text  x="109.48" y="335.5" ></text>
+</g>
+<g >
+<title>__GI___libc_malloc(bytes=65) (1 samples, 0.63%)</title><rect x="54.5" y="213" width="7.4" height="15.0" fill="rgb(234,46,4)" rx="2" ry="2" />
+<text  x="57.53" y="223.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.63%)</title><rect x="106.5" y="261" width="7.4" height="15.0" fill="rgb(226,116,52)" rx="2" ry="2" />
+<text  x="109.48" y="271.5" ></text>
+</g>
+<g >
+<title>std::future&lt;std::pair&lt;double, (14 samples, 8.81%)</title><rect x="1049.0" y="421" width="103.9" height="15.0" fill="rgb(253,37,25)" rx="2" ry="2" />
+<text  x="1051.99" y="431.5" >std::future&lt;..</text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::updateRanks (14 samples, 8.81%)</title><rect x="1049.0" y="437" width="103.9" height="15.0" fill="rgb(239,182,42)" rx="2" ry="2" />
+<text  x="1051.99" y="447.5" >MultiThreade..</text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::AtomicIterator&lt;std::__detail::_Node_iterator&lt;std::pair&lt;PageId (2 samples, 1.26%)</title><rect x="128.7" y="133" width="14.9" height="15.0" fill="rgb(218,123,23)" rx="2" ry="2" />
+<text  x="131.74" y="143.5" ></text>
+</g>
+<g >
+<title>sysmalloc (1 samples, 0.63%)</title><rect x="24.8" y="181" width="7.5" height="15.0" fill="rgb(251,25,24)" rx="2" ry="2" />
+<text  x="27.84" y="191.5" ></text>
+</g>
+<g >
+<title>std::operator+&lt;char, (1 samples, 0.63%)</title><rect x="91.6" y="309" width="7.5" height="15.0" fill="rgb(208,14,22)" rx="2" ry="2" />
+<text  x="94.64" y="319.5" ></text>
+</g>
+<g >
+<title>std::__future_base::_State_baseV2::_M_do_set(std::function&lt;std::unique_ptr&lt;std::__future_base::_Result_base, (14 samples, 8.81%)</title><rect x="648.2" y="277" width="103.9" height="15.0" fill="rgb(226,178,52)" rx="2" ry="2" />
+<text  x="651.24" y="287.5" >std::__futur..</text>
+</g>
+<g >
+<title>__gthread_mutex_unlock(__mutex=0x55bdc58e95d8) (2 samples, 1.26%)</title><rect x="663.1" y="85" width="14.8" height="15.0" fill="rgb(213,193,12)" rx="2" ry="2" />
+<text  x="666.08" y="95.5" ></text>
+</g>
+<g >
+<title>SimpleIdGenerator::generateId (1 samples, 0.63%)</title><rect x="24.8" y="325" width="7.5" height="15.0" fill="rgb(238,38,0)" rx="2" ry="2" />
+<text  x="27.84" y="335.5" ></text>
+</g>
+</g>
+</svg>

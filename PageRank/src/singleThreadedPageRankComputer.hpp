@@ -17,7 +17,6 @@ public:
     computeForNetwork(Network const& network, double alpha, uint32_t iterations,
         double tolerance) const
     {
-        // todo parallelize
         generatePageIds(network);
 
         PageMap pageHashMap;
@@ -76,7 +75,7 @@ private:
         PageRank getCurrentRank(uint32_t iteration) const noexcept { return ranks[iteration % 2]; }
 
         PageRank ranks[2];
-        size_t numLinks; // todo original impl has uint32_t, why?
+        size_t numLinks;
         bool isDangling;
     };
 

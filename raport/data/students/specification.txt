@@ -1,0 +1,27 @@
+# Obtained using lscpu
+Architektura:            x86_64
+Tryb(y) pracy CPU:       32-bit, 64-bit
+Kolejność bajtów:        Little Endian
+Rozmiary adresów:        40 bits physical, 48 bits virtual
+CPU:                     64
+Lista aktywnych CPU:     0-63
+Wątków na rdzeń:         1
+Rdzeni na gniazdo:       1
+Gniazd:                  64
+Węzłów NUMA:             1
+ID producenta:           GenuineIntel
+Rodzina CPU:             6
+Model:                   85
+Nazwa modelu:            Intel Xeon Processor (Skylake, IBRS)
+Wersja:                  4
+CPU MHz:                 2095.078
+BogoMIPS:                4190.15
+Producent hipernadzorcy: KVM
+Typ wirtualizacji:       pełna
+Cache L1d:               32K
+Cache L1i:               32K
+Cache L2:                4096K
+Cache L3:                16384K
+
+# Obtained using free -m -h
+RAM:                     328Gi

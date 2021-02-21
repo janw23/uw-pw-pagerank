@@ -1,0 +1,20 @@
+PageRank Performance Test [100 nodes, SingleThreadedPageRankComputer] took: 0.00217336s
+PageRank Performance Test [1000 nodes, SingleThreadedPageRankComputer] took:  0.716612s
+PageRank Performance Test [2000 nodes, SingleThreadedPageRankComputer] took:    2.7875s
+PageRank Performance Test [2000 nodes, MultiThreadedPageRankComputer[1]] took:   3.02911s
+PageRank Performance Test [2000 nodes, MultiThreadedPageRankComputer[2]] took:   1.91197s
+PageRank Performance Test [2000 nodes, MultiThreadedPageRankComputer[3]] took:   1.53059s
+PageRank Performance Test [2000 nodes, MultiThreadedPageRankComputer[4]] took:   1.35961s
+PageRank Performance Test [2000 nodes, MultiThreadedPageRankComputer[8]] took:    1.2049s
+PageRank Performance Test [500000 nodes, SingleThreadedPageRankComputer] took:   2.13856s
+PageRank Performance Test [500000 nodes, MultiThreadedPageRankComputer[1]] took:   2.14802s
+PageRank Performance Test [500000 nodes, MultiThreadedPageRankComputer[2]] took:   1.44398s
+PageRank Performance Test [500000 nodes, MultiThreadedPageRankComputer[3]] took:   1.48063s
+PageRank Performance Test [500000 nodes, MultiThreadedPageRankComputer[4]] took:   1.37098s
+PageRank Performance Test [500000 nodes, MultiThreadedPageRankComputer[8]] took:   1.75965s
+E2E Test [SingleThreadedPageRankComputer] took:   4.26601s
+E2E Test [MultiThreadedPageRankComputer[1]] took:   4.34383s
+E2E Test [MultiThreadedPageRankComputer[2]] took:   1.44441s
+E2E Test [MultiThreadedPageRankComputer[3]] took:   1.06267s
+E2E Test [MultiThreadedPageRankComputer[4]] took:  0.908167s
+E2E Test [MultiThreadedPageRankComputer[8]] took:  0.715283s

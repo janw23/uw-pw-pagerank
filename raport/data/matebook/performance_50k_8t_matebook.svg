@@ -1,0 +1,2008 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="598" onload="init(evt)" viewBox="0 0 1200 598" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+	}
+
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom();
+			zoom(target);
+		}
+		else if (e.target.id == "unzoom") unzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+	}, false)
+
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+		return;
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		// Fit in full text width
+		if (/^ *$/.test(txt) || t.getSubStringLength(0, txt.length) < w)
+			return;
+
+		for (var x = txt.length - 2; x > 0; x--) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom() {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			update_text(el[i]);
+		}
+		search();
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) {
+				currentSearchTerm = term;
+				search();
+			}
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (currentSearchTerm === null) return;
+		var term = currentSearchTerm;
+
+		var re = new RegExp(term, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="598.0" fill="url(#background)"  />
+<text id="title" x="600.00" y="24" >Flame Graph</text>
+<text id="details" x="10.00" y="581" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="581" > </text>
+<g id="frames">
+<g >
+<title>MultiThreadedPageRankComputer::AtomicIterator&lt;std::__detail::_Node_iterator&lt;std::pair&lt;PageIdconst, (8 samples, 5.48%)</title><rect x="123.2" y="181" width="64.6" height="15.0" fill="rgb(216,216,7)" rx="2" ry="2" />
+<text  x="126.15" y="191.5" >MultiTh..</text>
+</g>
+<g >
+<title>std::__detail::_Equal_helper&lt;PageId, (1 samples, 0.68%)</title><rect x="850.5" y="117" width="8.1" height="15.0" fill="rgb(217,191,33)" rx="2" ry="2" />
+<text  x="853.55" y="127.5" ></text>
+</g>
+<g >
+<title>__GI___pthread_mutex_lock(mutex=0x56159be373d8) (1 samples, 0.68%)</title><rect x="422.2" y="117" width="8.1" height="15.0" fill="rgb(224,75,49)" rx="2" ry="2" />
+<text  x="425.19" y="127.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.68%)</title><rect x="1036.4" y="373" width="8.1" height="15.0" fill="rgb(249,223,51)" rx="2" ry="2" />
+<text  x="1039.44" y="383.5" ></text>
+</g>
+<g >
+<title>std::unordered_map&lt;PageId, (1 samples, 0.68%)</title><rect x="519.2" y="181" width="8.1" height="15.0" fill="rgb(211,169,22)" rx="2" ry="2" />
+<text  x="522.18" y="191.5" ></text>
+</g>
+<g >
+<title>__gthread_mutex_lock(__mutex=0x56159be373d8) (1 samples, 0.68%)</title><rect x="82.7" y="133" width="8.1" height="15.0" fill="rgb(238,162,3)" rx="2" ry="2" />
+<text  x="85.74" y="143.5" ></text>
+</g>
+<g >
+<title>operatornew(unsigned (1 samples, 0.68%)</title><rect x="18.1" y="421" width="8.1" height="15.0" fill="rgb(225,67,27)" rx="2" ry="2" />
+<text  x="21.08" y="431.5" ></text>
+</g>
+<g >
+<title>std::char_traits&lt;char&gt;::copy(__n=70, (1 samples, 0.68%)</title><rect x="1028.4" y="325" width="8.0" height="15.0" fill="rgb(218,149,44)" rx="2" ry="2" />
+<text  x="1031.36" y="335.5" ></text>
+</g>
+<g >
+<title>std::_Hash_impl::hash(__seed=3339675911, (1 samples, 0.68%)</title><rect x="947.5" y="101" width="8.1" height="15.0" fill="rgb(225,144,13)" rx="2" ry="2" />
+<text  x="950.53" y="111.5" ></text>
+</g>
+<g >
+<title>all (146 samples, 100%)</title><rect x="10.0" y="549" width="1180.0" height="15.0" fill="rgb(232,146,9)" rx="2" ry="2" />
+<text  x="13.00" y="559.5" ></text>
+</g>
+<g >
+<title>__memmove_avx_unaligned_erms (1 samples, 0.68%)</title><rect x="1028.4" y="309" width="8.0" height="15.0" fill="rgb(253,188,16)" rx="2" ry="2" />
+<text  x="1031.36" y="319.5" ></text>
+</g>
+<g >
+<title>__gthread_mutex_lock(__mutex=0x56159be373d8) (1 samples, 0.68%)</title><rect x="422.2" y="133" width="8.1" height="15.0" fill="rgb(240,188,12)" rx="2" ry="2" />
+<text  x="425.19" y="143.5" ></text>
+</g>
+<g >
+<title>std::__future_base::_Async_state_commonV2::_M_complete_async (4 samples, 2.74%)</title><rect x="1109.2" y="421" width="32.3" height="15.0" fill="rgb(236,145,15)" rx="2" ry="2" />
+<text  x="1112.18" y="431.5" >st..</text>
+</g>
+<g >
+<title>std::function&lt;std::unique_ptr&lt;std::__future_base::_Result_base,std::__future_base::_Result_base::_Deleter&gt; (14 samples, 9.59%)</title><rect x="858.6" y="309" width="113.2" height="15.0" fill="rgb(248,57,3)" rx="2" ry="2" />
+<text  x="861.63" y="319.5" >std::function..</text>
+</g>
+<g >
+<title>__pthread_mutex_unlock_usercnt (1 samples, 0.68%)</title><rect x="697.0" y="101" width="8.1" height="15.0" fill="rgb(215,53,10)" rx="2" ry="2" />
+<text  x="699.99" y="111.5" ></text>
+</g>
+<g >
+<title>__GI___pthread_mutex_lock(mutex=0x56159be37330) (1 samples, 0.68%)</title><rect x="664.7" y="117" width="8.0" height="15.0" fill="rgb(217,49,32)" rx="2" ry="2" />
+<text  x="667.66" y="127.5" ></text>
+</g>
+<g >
+<title>std::hash&lt;std::__cxx11::basic_string&lt;char, (1 samples, 0.68%)</title><rect x="381.8" y="117" width="8.1" height="15.0" fill="rgb(221,82,53)" rx="2" ry="2" />
+<text  x="384.78" y="127.5" ></text>
+</g>
+<g >
+<title>std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 9.59%)</title><rect x="82.7" y="245" width="113.2" height="15.0" fill="rgb(253,228,32)" rx="2" ry="2" />
+<text  x="85.74" y="255.5" >std::thread::..</text>
+</g>
+<g >
+<title>__GI___pthread_mutex_unlock (1 samples, 0.68%)</title><rect x="236.3" y="117" width="8.1" height="15.0" fill="rgb(245,81,10)" rx="2" ry="2" />
+<text  x="239.30" y="127.5" ></text>
+</g>
+<g >
+<title>std::__future_base::_Task_setter&lt;std::unique_ptr&lt;std::__future_base::_Result&lt;std::pair&lt;double, (14 samples, 9.59%)</title><rect x="82.7" y="277" width="113.2" height="15.0" fill="rgb(225,63,43)" rx="2" ry="2" />
+<text  x="85.74" y="287.5" >std::__future..</text>
+</g>
+<g >
+<title>std::thread::_State_impl&lt;std::thread::_Invoker&lt;std::tuple&lt;std::__future_base::_Async_state_impl&lt;std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (110 samples, 75.34%)</title><rect x="82.7" y="485" width="889.1" height="15.0" fill="rgb(218,216,19)" rx="2" ry="2" />
+<text  x="85.74" y="495.5" >std::thread::_State_impl&lt;std::thread::_Invoker&lt;std::tuple&lt;std::__future_base::_Async_state_impl&lt;std::thread::_Invoker&lt;std::..</text>
+</g>
+<g >
+<title>__gthread_mutex_lock(__mutex=0x56159be373d8) (2 samples, 1.37%)</title><rect x="204.0" y="133" width="16.1" height="15.0" fill="rgb(207,4,46)" rx="2" ry="2" />
+<text  x="206.97" y="143.5" ></text>
+</g>
+<g >
+<title>Network::addPage (1 samples, 0.68%)</title><rect x="1165.8" y="485" width="8.0" height="15.0" fill="rgb(231,126,14)" rx="2" ry="2" />
+<text  x="1168.75" y="495.5" ></text>
+</g>
+<g >
+<title>std::allocator_traits&lt;std::allocator&lt;std::__detail::_Hash_node_base*&gt; (2 samples, 1.37%)</title><rect x="1141.5" y="405" width="16.2" height="15.0" fill="rgb(227,96,20)" rx="2" ry="2" />
+<text  x="1144.51" y="415.5" ></text>
+</g>
+<g >
+<title>__gnu_cxx::__to_xstring&lt;std::__cxx11::basic_string&lt;char, (1 samples, 0.68%)</title><rect x="1173.8" y="453" width="8.1" height="15.0" fill="rgb(240,110,23)" rx="2" ry="2" />
+<text  x="1176.84" y="463.5" ></text>
+</g>
+<g >
+<title>std::_Hashtable&lt;PageId,std::pair&lt;PageId (2 samples, 1.37%)</title><rect x="1060.7" y="405" width="16.1" height="15.0" fill="rgb(225,86,40)" rx="2" ry="2" />
+<text  x="1063.68" y="415.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::AtomicIterator&lt;std::__detail::_Node_iterator&lt;std::pair&lt;PageIdconst, (4 samples, 2.74%)</title><rect x="244.4" y="181" width="32.3" height="15.0" fill="rgb(221,205,19)" rx="2" ry="2" />
+<text  x="247.38" y="191.5" >Mu..</text>
+</g>
+<g >
+<title>__pthread_once_slow(once_control=0x56159be37958, (13 samples, 8.90%)</title><rect x="640.4" y="341" width="105.1" height="15.0" fill="rgb(242,0,50)" rx="2" ry="2" />
+<text  x="643.41" y="351.5" >__pthread_on..</text>
+</g>
+<g >
+<title>std::_Hashtable&lt;PageId,std::pair&lt;PageId (2 samples, 1.37%)</title><rect x="955.6" y="165" width="16.2" height="15.0" fill="rgb(212,5,41)" rx="2" ry="2" />
+<text  x="958.62" y="175.5" ></text>
+</g>
+<g >
+<title>std::__detail::_Hashtable_alloc&lt;std::allocator&lt;std::__detail::_Hash_node&lt;std::pair&lt;PageId (2 samples, 1.37%)</title><rect x="1141.5" y="421" width="16.2" height="15.0" fill="rgb(213,4,39)" rx="2" ry="2" />
+<text  x="1144.51" y="431.5" ></text>
+</g>
+<g >
+<title>__pthread_once_slow(once_control=0x56159be37558, (13 samples, 8.90%)</title><rect x="195.9" y="341" width="105.1" height="15.0" fill="rgb(237,208,33)" rx="2" ry="2" />
+<text  x="198.89" y="351.5" >__pthread_on..</text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.68%)</title><rect x="1028.4" y="357" width="8.0" height="15.0" fill="rgb(233,43,21)" rx="2" ry="2" />
+<text  x="1031.36" y="367.5" ></text>
+</g>
+<g >
+<title>PageId::operator== (2 samples, 1.37%)</title><rect x="1044.5" y="357" width="16.2" height="15.0" fill="rgb(251,111,20)" rx="2" ry="2" />
+<text  x="1047.52" y="367.5" ></text>
+</g>
+<g >
+<title>std::__future_base::_Task_setter&lt;std::unique_ptr&lt;std::__future_base::_Result&lt;std::pair&lt;double, (13 samples, 8.90%)</title><rect x="195.9" y="277" width="105.1" height="15.0" fill="rgb(210,17,6)" rx="2" ry="2" />
+<text  x="198.89" y="287.5" >std::__futur..</text>
+</g>
+<g >
+<title>__pthread_mutex_unlock_usercnt(decr=1, (1 samples, 0.68%)</title><rect x="567.7" y="101" width="8.1" height="15.0" fill="rgb(233,9,22)" rx="2" ry="2" />
+<text  x="570.67" y="111.5" ></text>
+</g>
+<g >
+<title>std::_Hashtable&lt;PageId, (1 samples, 0.68%)</title><rect x="939.5" y="149" width="8.0" height="15.0" fill="rgb(239,38,22)" rx="2" ry="2" />
+<text  x="942.45" y="159.5" ></text>
+</g>
+<g >
+<title>__gthread_mutex_unlock(__mutex=0x56159be372c0) (1 samples, 0.68%)</title><rect x="769.7" y="133" width="8.1" height="15.0" fill="rgb(214,157,50)" rx="2" ry="2" />
+<text  x="772.73" y="143.5" ></text>
+</g>
+<g >
+<title>std::lock_guard&lt;std::mutex&gt;::~lock_guard (2 samples, 1.37%)</title><rect x="228.2" y="165" width="16.2" height="15.0" fill="rgb(245,37,12)" rx="2" ry="2" />
+<text  x="231.22" y="175.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;,std::unordered_map&lt;PageId, (2 samples, 1.37%)</title><rect x="397.9" y="197" width="16.2" height="15.0" fill="rgb(250,54,42)" rx="2" ry="2" />
+<text  x="400.95" y="207.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (13 samples, 8.90%)</title><rect x="82.7" y="197" width="105.1" height="15.0" fill="rgb(248,61,10)" rx="2" ry="2" />
+<text  x="85.74" y="207.5" >MultiThreade..</text>
+</g>
+<g >
+<title>systrim(pad=&lt;optimized (1 samples, 0.68%)</title><rect x="1181.9" y="405" width="8.1" height="15.0" fill="rgb(246,118,22)" rx="2" ry="2" />
+<text  x="1184.92" y="415.5" ></text>
+</g>
+<g >
+<title>__gthread_mutex_unlock(__mutex=0x56159be37410) (1 samples, 0.68%)</title><rect x="115.1" y="133" width="8.1" height="15.0" fill="rgb(207,84,35)" rx="2" ry="2" />
+<text  x="118.07" y="143.5" ></text>
+</g>
+<g >
+<title>std::unordered_map&lt;PageId, (4 samples, 2.74%)</title><rect x="939.5" y="181" width="32.3" height="15.0" fill="rgb(247,227,6)" rx="2" ry="2" />
+<text  x="942.45" y="191.5" >st..</text>
+</g>
+<g >
+<title>std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (13 samples, 8.90%)</title><rect x="640.4" y="245" width="105.1" height="15.0" fill="rgb(245,12,22)" rx="2" ry="2" />
+<text  x="643.41" y="255.5" >std::thread:..</text>
+</g>
+<g >
+<title>__gthread_mutex_lock(__mutex=0x56159be373d8) (2 samples, 1.37%)</title><rect x="543.4" y="133" width="16.2" height="15.0" fill="rgb(247,32,49)" rx="2" ry="2" />
+<text  x="546.42" y="143.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;,std::unordered_map&lt;PageId, (1 samples, 0.68%)</title><rect x="187.8" y="197" width="8.1" height="15.0" fill="rgb(209,229,17)" rx="2" ry="2" />
+<text  x="190.81" y="207.5" ></text>
+</g>
+<g >
+<title>std::thread::_Invoker&lt;std::tuple&lt;std::__future_base::_Async_state_impl&lt;std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (110 samples, 75.34%)</title><rect x="82.7" y="453" width="889.1" height="15.0" fill="rgb(227,42,24)" rx="2" ry="2" />
+<text  x="85.74" y="463.5" >std::thread::_Invoker&lt;std::tuple&lt;std::__future_base::_Async_state_impl&lt;std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRa..</text>
+</g>
+<g >
+<title>std::__detail::_Map_base&lt;PageId, (2 samples, 1.37%)</title><rect x="1044.5" y="453" width="16.2" height="15.0" fill="rgb(249,228,42)" rx="2" ry="2" />
+<text  x="1047.52" y="463.5" ></text>
+</g>
+<g >
+<title>__gthread_mutex_lock(__mutex=0x56159be372f8) (1 samples, 0.68%)</title><rect x="195.9" y="133" width="8.1" height="15.0" fill="rgb(239,72,2)" rx="2" ry="2" />
+<text  x="198.89" y="143.5" ></text>
+</g>
+<g >
+<title>__gthread_mutex_lock(__mutex=0x56159be37330) (1 samples, 0.68%)</title><rect x="664.7" y="133" width="8.0" height="15.0" fill="rgb(214,2,2)" rx="2" ry="2" />
+<text  x="667.66" y="143.5" ></text>
+</g>
+<g >
+<title>__gthread_mutex_unlock(__mutex=0x56159be373a0) (1 samples, 0.68%)</title><rect x="575.8" y="133" width="8.0" height="15.0" fill="rgb(243,0,4)" rx="2" ry="2" />
+<text  x="578.75" y="143.5" ></text>
+</g>
+<g >
+<title>unlink_chunk (1 samples, 0.68%)</title><rect x="1149.6" y="341" width="8.1" height="15.0" fill="rgb(231,105,6)" rx="2" ry="2" />
+<text  x="1152.59" y="351.5" ></text>
+</g>
+<g >
+<title>__gthread_mutex_unlock(__mutex=0x56159be37448) (1 samples, 0.68%)</title><rect x="236.3" y="133" width="8.1" height="15.0" fill="rgb(227,13,12)" rx="2" ry="2" />
+<text  x="239.30" y="143.5" ></text>
+</g>
+<g >
+<title>std::__future_base::_Async_state_commonV2::_M_join (4 samples, 2.74%)</title><rect x="1109.2" y="405" width="32.3" height="15.0" fill="rgb(212,174,43)" rx="2" ry="2" />
+<text  x="1112.18" y="415.5" >st..</text>
+</g>
+<g >
+<title>std::mutex::unlock (3 samples, 2.05%)</title><rect x="98.9" y="149" width="24.3" height="15.0" fill="rgb(220,228,12)" rx="2" ry="2" />
+<text  x="101.90" y="159.5" >s..</text>
+</g>
+<g >
+<title>__gnu_cxx::new_allocator&lt;PageIdAndRank&gt;::deallocate(this=0x7ffe9048f7e0, (1 samples, 0.68%)</title><rect x="1181.9" y="437" width="8.1" height="15.0" fill="rgb(245,162,13)" rx="2" ry="2" />
+<text  x="1184.92" y="447.5" ></text>
+</g>
+<g >
+<title>__lll_lock_wait (1 samples, 0.68%)</title><rect x="680.8" y="101" width="8.1" height="15.0" fill="rgb(205,57,44)" rx="2" ry="2" />
+<text  x="683.82" y="111.5" ></text>
+</g>
+<g >
+<title>__GI___sbrk (1 samples, 0.68%)</title><rect x="1181.9" y="373" width="8.1" height="15.0" fill="rgb(211,163,10)" rx="2" ry="2" />
+<text  x="1184.92" y="383.5" ></text>
+</g>
+<g >
+<title>std::__future_base::_State_baseV2::_M_do_set(std::function&lt;std::unique_ptr&lt;std::__future_base::_Result_base, (13 samples, 8.90%)</title><rect x="195.9" y="325" width="105.1" height="15.0" fill="rgb(224,138,12)" rx="2" ry="2" />
+<text  x="198.89" y="335.5" >std::__futur..</text>
+</g>
+<g >
+<title>std::__future_base::_Task_setter&lt;std::unique_ptr&lt;std::__future_base::_Result&lt;std::pair&lt;double, (14 samples, 9.59%)</title><rect x="414.1" y="277" width="113.2" height="15.0" fill="rgb(252,92,29)" rx="2" ry="2" />
+<text  x="417.11" y="287.5" >std::__future..</text>
+</g>
+<g >
+<title>std::__detail::_Hashtable_base&lt;PageId, (2 samples, 1.37%)</title><rect x="1044.5" y="405" width="16.2" height="15.0" fill="rgb(215,33,44)" rx="2" ry="2" />
+<text  x="1047.52" y="415.5" ></text>
+</g>
+<g >
+<title>__gnu_cxx::new_allocator&lt;std::__detail::_Hash_node&lt;std::pair&lt;PageIdconst, (1 samples, 0.68%)</title><rect x="1157.7" y="373" width="8.1" height="15.0" fill="rgb(245,83,21)" rx="2" ry="2" />
+<text  x="1160.67" y="383.5" ></text>
+</g>
+<g >
+<title>std::mutex::unlock (3 samples, 2.05%)</title><rect x="559.6" y="149" width="24.2" height="15.0" fill="rgb(238,101,50)" rx="2" ry="2" />
+<text  x="562.59" y="159.5" >s..</text>
+</g>
+<g >
+<title>std::_Vector_base&lt;PageIdAndRank, (1 samples, 0.68%)</title><rect x="1181.9" y="469" width="8.1" height="15.0" fill="rgb(224,165,33)" rx="2" ry="2" />
+<text  x="1184.92" y="479.5" ></text>
+</g>
+<g >
+<title>std::mutex::lock (2 samples, 1.37%)</title><rect x="414.1" y="149" width="16.2" height="15.0" fill="rgb(250,184,31)" rx="2" ry="2" />
+<text  x="417.11" y="159.5" ></text>
+</g>
+<g >
+<title>std::function&lt;std::unique_ptr&lt;std::__future_base::_Result_base,std::__future_base::_Result_base::_Deleter&gt; (14 samples, 9.59%)</title><rect x="301.0" y="309" width="113.1" height="15.0" fill="rgb(209,101,30)" rx="2" ry="2" />
+<text  x="303.96" y="319.5" >std::function..</text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::updateRanks (6 samples, 4.11%)</title><rect x="26.2" y="533" width="48.5" height="15.0" fill="rgb(225,22,42)" rx="2" ry="2" />
+<text  x="29.16" y="543.5" >Mult..</text>
+</g>
+<g >
+<title>std::call_once&lt;void (3 samples, 2.05%)</title><rect x="50.4" y="437" width="24.3" height="15.0" fill="rgb(212,178,39)" rx="2" ry="2" />
+<text  x="53.41" y="447.5" >s..</text>
+</g>
+<g >
+<title>__gthread_mutex_unlock(__mutex=0x56159be37330) (2 samples, 1.37%)</title><rect x="559.6" y="133" width="16.2" height="15.0" fill="rgb(249,54,1)" rx="2" ry="2" />
+<text  x="562.59" y="143.5" ></text>
+</g>
+<g >
+<title>std::mutex::lock (2 samples, 1.37%)</title><rect x="858.6" y="149" width="16.2" height="15.0" fill="rgb(220,181,15)" rx="2" ry="2" />
+<text  x="861.63" y="159.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.68%)</title><rect x="1028.4" y="341" width="8.0" height="15.0" fill="rgb(231,120,41)" rx="2" ry="2" />
+<text  x="1031.36" y="351.5" ></text>
+</g>
+<g >
+<title>std::__future_base::_State_baseV2::_M_do_set(std::function&lt;std::unique_ptr&lt;std::__future_base::_Result_base, (14 samples, 9.59%)</title><rect x="527.3" y="325" width="113.1" height="15.0" fill="rgb(209,109,53)" rx="2" ry="2" />
+<text  x="530.26" y="335.5" >std::__future..</text>
+</g>
+<g >
+<title>__gthread_mutex_lock(__mutex=0x56159be373d8) (1 samples, 0.68%)</title><rect x="858.6" y="133" width="8.1" height="15.0" fill="rgb(253,19,27)" rx="2" ry="2" />
+<text  x="861.63" y="143.5" ></text>
+</g>
+<g >
+<title>std::hash&lt;std::__cxx11::basic_string&lt;char, (1 samples, 0.68%)</title><rect x="947.5" y="117" width="8.1" height="15.0" fill="rgb(246,26,35)" rx="2" ry="2" />
+<text  x="950.53" y="127.5" ></text>
+</g>
+<g >
+<title>__GI___pthread_mutex_lock(mutex=0x56159be373d8) (2 samples, 1.37%)</title><rect x="543.4" y="117" width="16.2" height="15.0" fill="rgb(205,215,45)" rx="2" ry="2" />
+<text  x="546.42" y="127.5" ></text>
+</g>
+<g >
+<title>std::__future_base::_Task_setter&lt;std::unique_ptr&lt;std::__future_base::_Result&lt;std::pair&lt;double, (13 samples, 8.90%)</title><rect x="640.4" y="277" width="105.1" height="15.0" fill="rgb(209,127,22)" rx="2" ry="2" />
+<text  x="643.41" y="287.5" >std::__futur..</text>
+</g>
+<g >
+<title>__lll_lock_wait (1 samples, 0.68%)</title><rect x="82.7" y="101" width="8.1" height="15.0" fill="rgb(253,163,2)" rx="2" ry="2" />
+<text  x="85.74" y="111.5" ></text>
+</g>
+<g >
+<title>std::__invoke_impl&lt;std::pair&lt;double, (14 samples, 9.59%)</title><rect x="858.6" y="213" width="113.2" height="15.0" fill="rgb(205,25,3)" rx="2" ry="2" />
+<text  x="861.63" y="223.5" >std::__invoke..</text>
+</g>
+<g >
+<title>std::future&lt;std::pair&lt;double, (6 samples, 4.11%)</title><rect x="26.2" y="517" width="48.5" height="15.0" fill="rgb(250,125,49)" rx="2" ry="2" />
+<text  x="29.16" y="527.5" >std:..</text>
+</g>
+<g >
+<title>std::allocator_traits&lt;std::allocator&lt;PageIdAndRank&gt; (1 samples, 0.68%)</title><rect x="1036.4" y="437" width="8.1" height="15.0" fill="rgb(254,8,33)" rx="2" ry="2" />
+<text  x="1039.44" y="447.5" ></text>
+</g>
+<g >
+<title>std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 9.59%)</title><rect x="745.5" y="245" width="113.1" height="15.0" fill="rgb(219,219,13)" rx="2" ry="2" />
+<text  x="748.48" y="255.5" >std::thread::..</text>
+</g>
+<g >
+<title>std::__detail::_Hashtable_alloc&lt;std::allocator&lt;std::__detail::_Hash_node&lt;std::pair&lt;PageId (1 samples, 0.68%)</title><rect x="1157.7" y="437" width="8.1" height="15.0" fill="rgb(240,110,33)" rx="2" ry="2" />
+<text  x="1160.67" y="447.5" ></text>
+</g>
+<g >
+<title>std::lock_guard&lt;std::mutex&gt;::lock_guard (4 samples, 2.74%)</title><rect x="195.9" y="165" width="32.3" height="15.0" fill="rgb(213,156,5)" rx="2" ry="2" />
+<text  x="198.89" y="175.5" >st..</text>
+</g>
+<g >
+<title>??() (110 samples, 75.34%)</title><rect x="82.7" y="501" width="889.1" height="15.0" fill="rgb(233,30,51)" rx="2" ry="2" />
+<text  x="85.74" y="511.5" >??()</text>
+</g>
+<g >
+<title>std::_Hashtable&lt;PageId, (2 samples, 1.37%)</title><rect x="1141.5" y="437" width="16.2" height="15.0" fill="rgb(244,178,38)" rx="2" ry="2" />
+<text  x="1144.51" y="447.5" ></text>
+</g>
+<g >
+<title>__lll_lock_wait (1 samples, 0.68%)</title><rect x="414.1" y="101" width="8.1" height="15.0" fill="rgb(245,116,45)" rx="2" ry="2" />
+<text  x="417.11" y="111.5" ></text>
+</g>
+<g >
+<title>std::__future_base::_State_baseV2::_M_set_result(std::function&lt;std::unique_ptr&lt;std::__future_base::_Result_base, (110 samples, 75.34%)</title><rect x="82.7" y="389" width="889.1" height="15.0" fill="rgb(229,36,36)" rx="2" ry="2" />
+<text  x="85.74" y="399.5" >std::__future_base::_State_baseV2::_M_set_result(std::function&lt;std::unique_ptr&lt;std::__future_base::_Result_base,</text>
+</g>
+<g >
+<title>std::thread::_Invoker&lt;std::tuple&lt;std::__future_base::_Async_state_impl&lt;std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (110 samples, 75.34%)</title><rect x="82.7" y="469" width="889.1" height="15.0" fill="rgb(215,112,54)" rx="2" ry="2" />
+<text  x="85.74" y="479.5" >std::thread::_Invoker&lt;std::tuple&lt;std::__future_base::_Async_state_impl&lt;std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRa..</text>
+</g>
+<g >
+<title>std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (13 samples, 8.90%)</title><rect x="195.9" y="245" width="105.1" height="15.0" fill="rgb(222,225,41)" rx="2" ry="2" />
+<text  x="198.89" y="255.5" >std::thread:..</text>
+</g>
+<g >
+<title>std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (13 samples, 8.90%)</title><rect x="195.9" y="261" width="105.1" height="15.0" fill="rgb(246,216,42)" rx="2" ry="2" />
+<text  x="198.89" y="271.5" >std::thread:..</text>
+</g>
+<g >
+<title>__GI___pthread_mutex_lock(mutex=0x56159be37448) (1 samples, 0.68%)</title><rect x="90.8" y="117" width="8.1" height="15.0" fill="rgb(229,39,47)" rx="2" ry="2" />
+<text  x="93.82" y="127.5" ></text>
+</g>
+<g >
+<title>malloc_consolidate(av=av@entry=0x7fdd1220bb80 (1 samples, 0.68%)</title><rect x="1149.6" y="357" width="8.1" height="15.0" fill="rgb(239,11,33)" rx="2" ry="2" />
+<text  x="1152.59" y="367.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.68%)</title><rect x="18.1" y="453" width="8.1" height="15.0" fill="rgb(235,168,28)" rx="2" ry="2" />
+<text  x="21.08" y="463.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.68%)</title><rect x="1028.4" y="421" width="8.0" height="15.0" fill="rgb(221,132,42)" rx="2" ry="2" />
+<text  x="1031.36" y="431.5" ></text>
+</g>
+<g >
+<title>std::call_once&lt;void (4 samples, 2.74%)</title><rect x="1109.2" y="389" width="32.3" height="15.0" fill="rgb(235,195,6)" rx="2" ry="2" />
+<text  x="1112.18" y="399.5" >st..</text>
+</g>
+<g >
+<title>std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 9.59%)</title><rect x="301.0" y="245" width="113.1" height="15.0" fill="rgb(237,31,8)" rx="2" ry="2" />
+<text  x="303.96" y="255.5" >std::thread::..</text>
+</g>
+<g >
+<title>__GI___pthread_mutex_lock(mutex=0x56159be373a0) (1 samples, 0.68%)</title><rect x="535.3" y="117" width="8.1" height="15.0" fill="rgb(207,16,16)" rx="2" ry="2" />
+<text  x="538.34" y="127.5" ></text>
+</g>
+<g >
+<title>__GI___pthread_mutex_unlock (1 samples, 0.68%)</title><rect x="98.9" y="117" width="8.1" height="15.0" fill="rgb(231,144,47)" rx="2" ry="2" />
+<text  x="101.90" y="127.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (12 samples, 8.22%)</title><rect x="301.0" y="197" width="96.9" height="15.0" fill="rgb(229,184,41)" rx="2" ry="2" />
+<text  x="303.96" y="207.5" >MultiThread..</text>
+</g>
+<g >
+<title>__gnu_cxx::new_allocator&lt;std::__detail::_Hash_node_base*&gt;::deallocate(this=&lt;synthetic (2 samples, 1.37%)</title><rect x="1141.5" y="389" width="16.2" height="15.0" fill="rgb(211,174,27)" rx="2" ry="2" />
+<text  x="1144.51" y="399.5" ></text>
+</g>
+<g >
+<title>std::thread::join()() (3 samples, 2.05%)</title><rect x="50.4" y="389" width="24.3" height="15.0" fill="rgb(245,83,29)" rx="2" ry="2" />
+<text  x="53.41" y="399.5" >s..</text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.68%)</title><rect x="1036.4" y="357" width="8.1" height="15.0" fill="rgb(209,109,40)" rx="2" ry="2" />
+<text  x="1039.44" y="367.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::to_string(__val=480752) (1 samples, 0.68%)</title><rect x="1173.8" y="469" width="8.1" height="15.0" fill="rgb(248,54,14)" rx="2" ry="2" />
+<text  x="1176.84" y="479.5" ></text>
+</g>
+<g >
+<title>__GI___pthread_mutex_lock(mutex=0x56159be373a0) (1 samples, 0.68%)</title><rect x="309.0" y="117" width="8.1" height="15.0" fill="rgb(237,78,52)" rx="2" ry="2" />
+<text  x="312.04" y="127.5" ></text>
+</g>
+<g >
+<title>??() (1 samples, 0.68%)</title><rect x="10.0" y="517" width="8.1" height="15.0" fill="rgb(250,103,50)" rx="2" ry="2" />
+<text  x="13.00" y="527.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 9.59%)</title><rect x="858.6" y="197" width="113.2" height="15.0" fill="rgb(213,217,10)" rx="2" ry="2" />
+<text  x="861.63" y="207.5" >MultiThreaded..</text>
+</g>
+<g >
+<title>__gthread_once(__func=&lt;optimized (110 samples, 75.34%)</title><rect x="82.7" y="357" width="889.1" height="15.0" fill="rgb(238,92,52)" rx="2" ry="2" />
+<text  x="85.74" y="367.5" >__gthread_once(__func=&lt;optimized</text>
+</g>
+<g >
+<title>std::lock_guard&lt;std::mutex&gt;::lock_guard (2 samples, 1.37%)</title><rect x="414.1" y="165" width="16.2" height="15.0" fill="rgb(251,169,44)" rx="2" ry="2" />
+<text  x="417.11" y="175.5" ></text>
+</g>
+<g >
+<title>std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 9.59%)</title><rect x="745.5" y="261" width="113.1" height="15.0" fill="rgb(218,120,20)" rx="2" ry="2" />
+<text  x="748.48" y="271.5" >std::thread::..</text>
+</g>
+<g >
+<title>std::_Hash_impl::hash(__seed=3339675911, (1 samples, 0.68%)</title><rect x="381.8" y="101" width="8.1" height="15.0" fill="rgb(225,160,54)" rx="2" ry="2" />
+<text  x="384.78" y="111.5" ></text>
+</g>
+<g >
+<title>__lll_lock_wait (1 samples, 0.68%)</title><rect x="753.6" y="101" width="8.0" height="15.0" fill="rgb(223,78,49)" rx="2" ry="2" />
+<text  x="756.56" y="111.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::initPages (1 samples, 0.68%)</title><rect x="18.1" y="533" width="8.1" height="15.0" fill="rgb(211,216,12)" rx="2" ry="2" />
+<text  x="21.08" y="543.5" ></text>
+</g>
+<g >
+<title>std::__detail::_Mod_range_hashing::operator() (1 samples, 0.68%)</title><rect x="939.5" y="117" width="8.0" height="15.0" fill="rgb(249,202,20)" rx="2" ry="2" />
+<text  x="942.45" y="127.5" ></text>
+</g>
+<g >
+<title>__pthread_mutex_unlock_usercnt (1 samples, 0.68%)</title><rect x="559.6" y="101" width="8.1" height="15.0" fill="rgb(221,147,30)" rx="2" ry="2" />
+<text  x="562.59" y="111.5" ></text>
+</g>
+<g >
+<title>std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 9.59%)</title><rect x="858.6" y="245" width="113.2" height="15.0" fill="rgb(213,136,53)" rx="2" ry="2" />
+<text  x="861.63" y="255.5" >std::thread::..</text>
+</g>
+<g >
+<title>std::__detail::_Equal_helper&lt;PageId, (2 samples, 1.37%)</title><rect x="1044.5" y="389" width="16.2" height="15.0" fill="rgb(253,56,1)" rx="2" ry="2" />
+<text  x="1047.52" y="399.5" ></text>
+</g>
+<g >
+<title>PageId::operator== (1 samples, 0.68%)</title><rect x="850.5" y="85" width="8.1" height="15.0" fill="rgb(225,134,4)" rx="2" ry="2" />
+<text  x="853.55" y="95.5" ></text>
+</g>
+<g >
+<title>std::__future_base::_Async_state_commonV2::_M_complete_async (4 samples, 2.74%)</title><rect x="1076.8" y="421" width="32.4" height="15.0" fill="rgb(230,127,40)" rx="2" ry="2" />
+<text  x="1079.85" y="431.5" >st..</text>
+</g>
+<g >
+<title>__gthread_mutex_unlock(__mutex=0x56159be373a0) (1 samples, 0.68%)</title><rect x="430.3" y="133" width="8.1" height="15.0" fill="rgb(209,194,11)" rx="2" ry="2" />
+<text  x="433.27" y="143.5" ></text>
+</g>
+<g >
+<title>__GI___pthread_mutex_lock(mutex=0x56159be373d8) (2 samples, 1.37%)</title><rect x="204.0" y="117" width="16.1" height="15.0" fill="rgb(239,190,5)" rx="2" ry="2" />
+<text  x="206.97" y="127.5" ></text>
+</g>
+<g >
+<title>std::function&lt;std::unique_ptr&lt;std::__future_base::_Result_base,std::__future_base::_Result_base::_Deleter&gt; (14 samples, 9.59%)</title><rect x="745.5" y="309" width="113.1" height="15.0" fill="rgb(231,59,28)" rx="2" ry="2" />
+<text  x="748.48" y="319.5" >std::function..</text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char,std::char_traits&lt;char&gt;, (1 samples, 0.68%)</title><rect x="1052.6" y="325" width="8.1" height="15.0" fill="rgb(217,165,12)" rx="2" ry="2" />
+<text  x="1055.60" y="335.5" ></text>
+</g>
+<g >
+<title>__GI___pthread_mutex_lock(mutex=0x56159be372f8) (1 samples, 0.68%)</title><rect x="656.6" y="117" width="8.1" height="15.0" fill="rgb(232,10,10)" rx="2" ry="2" />
+<text  x="659.58" y="127.5" ></text>
+</g>
+<g >
+<title>__pthread_once_slow(once_control=0x56159be37b38, (3 samples, 2.05%)</title><rect x="50.4" y="405" width="24.3" height="15.0" fill="rgb(210,62,38)" rx="2" ry="2" />
+<text  x="53.41" y="415.5" >_..</text>
+</g>
+<g >
+<title>std::__future_base::_Async_state_commonV2::_M_join (3 samples, 2.05%)</title><rect x="26.2" y="453" width="24.2" height="15.0" fill="rgb(223,176,9)" rx="2" ry="2" />
+<text  x="29.16" y="463.5" >s..</text>
+</g>
+<g >
+<title>std::_Vector_base&lt;PageIdAndRank, (1 samples, 0.68%)</title><rect x="1181.9" y="485" width="8.1" height="15.0" fill="rgb(226,228,36)" rx="2" ry="2" />
+<text  x="1184.92" y="495.5" ></text>
+</g>
+<g >
+<title>NetworkWithoutManyEdgesGenerator::generateNetworkOfSize (2 samples, 1.37%)</title><rect x="1165.8" y="501" width="16.1" height="15.0" fill="rgb(251,34,31)" rx="2" ry="2" />
+<text  x="1168.75" y="511.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::PageInfo::setCurrentRank (1 samples, 0.68%)</title><rect x="276.7" y="181" width="8.1" height="15.0" fill="rgb(241,14,47)" rx="2" ry="2" />
+<text  x="279.71" y="191.5" ></text>
+</g>
+<g >
+<title>__GI___pthread_mutex_lock(mutex=0x56159be373d8) (1 samples, 0.68%)</title><rect x="753.6" y="117" width="8.0" height="15.0" fill="rgb(252,89,26)" rx="2" ry="2" />
+<text  x="756.56" y="127.5" ></text>
+</g>
+<g >
+<title>std::__detail::_Node_iterator&lt;std::pair&lt;PageId (1 samples, 0.68%)</title><rect x="648.5" y="165" width="8.1" height="15.0" fill="rgb(243,56,13)" rx="2" ry="2" />
+<text  x="651.49" y="175.5" ></text>
+</g>
+<g >
+<title>std::__detail::_Hashtable_base&lt;PageId, (1 samples, 0.68%)</title><rect x="850.5" y="149" width="8.1" height="15.0" fill="rgb(222,53,14)" rx="2" ry="2" />
+<text  x="853.55" y="159.5" ></text>
+</g>
+<g >
+<title>_int_free(av=0x7fdd1220bb80 (2 samples, 1.37%)</title><rect x="1141.5" y="373" width="16.2" height="15.0" fill="rgb(205,5,46)" rx="2" ry="2" />
+<text  x="1144.51" y="383.5" ></text>
+</g>
+<g >
+<title>std::__future_base::_State_baseV2::_M_do_set(std::function&lt;std::unique_ptr&lt;std::__future_base::_Result_base, (13 samples, 8.90%)</title><rect x="640.4" y="325" width="105.1" height="15.0" fill="rgb(222,78,0)" rx="2" ry="2" />
+<text  x="643.41" y="335.5" >std::__futur..</text>
+</g>
+<g >
+<title>std::mutex::lock (2 samples, 1.37%)</title><rect x="309.0" y="149" width="16.2" height="15.0" fill="rgb(235,200,0)" rx="2" ry="2" />
+<text  x="312.04" y="159.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.68%)</title><rect x="18.1" y="469" width="8.1" height="15.0" fill="rgb(209,157,38)" rx="2" ry="2" />
+<text  x="21.08" y="479.5" ></text>
+</g>
+<g >
+<title>std::_Function_handler&lt;std::unique_ptr&lt;std::__future_base::_Result_base,std::__future_base::_Result_base::_Deleter&gt; (14 samples, 9.59%)</title><rect x="745.5" y="293" width="113.1" height="15.0" fill="rgb(215,28,9)" rx="2" ry="2" />
+<text  x="748.48" y="303.5" >std::_Functio..</text>
+</g>
+<g >
+<title>__GI___pthread_mutex_lock(mutex=0x56159be373a0) (1 samples, 0.68%)</title><rect x="414.1" y="117" width="8.1" height="15.0" fill="rgb(210,70,38)" rx="2" ry="2" />
+<text  x="417.11" y="127.5" ></text>
+</g>
+<g >
+<title>__GI___pthread_mutex_unlock (1 samples, 0.68%)</title><rect x="575.8" y="117" width="8.0" height="15.0" fill="rgb(224,181,25)" rx="2" ry="2" />
+<text  x="578.75" y="127.5" ></text>
+</g>
+<g >
+<title>std::lock_guard&lt;std::mutex&gt;::lock_guard (2 samples, 1.37%)</title><rect x="82.7" y="165" width="16.2" height="15.0" fill="rgb(245,197,48)" rx="2" ry="2" />
+<text  x="85.74" y="175.5" ></text>
+</g>
+<g >
+<title>__GI___pthread_mutex_lock(mutex=0x56159be37448) (1 samples, 0.68%)</title><rect x="688.9" y="117" width="8.1" height="15.0" fill="rgb(223,40,14)" rx="2" ry="2" />
+<text  x="691.90" y="127.5" ></text>
+</g>
+<g >
+<title>__GI___pthread_mutex_lock(mutex=0x56159be373d8) (1 samples, 0.68%)</title><rect x="680.8" y="117" width="8.1" height="15.0" fill="rgb(219,109,49)" rx="2" ry="2" />
+<text  x="683.82" y="127.5" ></text>
+</g>
+<g >
+<title>std::lock_guard&lt;std::mutex&gt;::lock_guard (2 samples, 1.37%)</title><rect x="309.0" y="165" width="16.2" height="15.0" fill="rgb(214,85,9)" rx="2" ry="2" />
+<text  x="312.04" y="175.5" ></text>
+</g>
+<g >
+<title>__gthread_mutex_lock(__mutex=0x56159be373d8) (1 samples, 0.68%)</title><rect x="753.6" y="133" width="8.0" height="15.0" fill="rgb(227,183,54)" rx="2" ry="2" />
+<text  x="756.56" y="143.5" ></text>
+</g>
+<g >
+<title>__lll_lock_wait (1 samples, 0.68%)</title><rect x="535.3" y="101" width="8.1" height="15.0" fill="rgb(224,112,7)" rx="2" ry="2" />
+<text  x="538.34" y="111.5" ></text>
+</g>
+<g >
+<title>__gthread_mutex_lock(__mutex=0x56159be373a0) (1 samples, 0.68%)</title><rect x="672.7" y="133" width="8.1" height="15.0" fill="rgb(250,177,3)" rx="2" ry="2" />
+<text  x="675.74" y="143.5" ></text>
+</g>
+<g >
+<title>std::operator==&lt;char&gt; (1 samples, 0.68%)</title><rect x="1052.6" y="341" width="8.1" height="15.0" fill="rgb(249,1,38)" rx="2" ry="2" />
+<text  x="1055.60" y="351.5" ></text>
+</g>
+<g >
+<title>std::mutex::unlock (1 samples, 0.68%)</title><rect x="769.7" y="149" width="8.1" height="15.0" fill="rgb(215,70,5)" rx="2" ry="2" />
+<text  x="772.73" y="159.5" ></text>
+</g>
+<g >
+<title>std::__future_base::_Task_setter&lt;std::unique_ptr&lt;std::__future_base::_Result&lt;std::pair&lt;double, (14 samples, 9.59%)</title><rect x="858.6" y="277" width="113.2" height="15.0" fill="rgb(249,142,42)" rx="2" ry="2" />
+<text  x="861.63" y="287.5" >std::__future..</text>
+</g>
+<g >
+<title>__pthread_once_slow(once_control=0x56159be37cf8, (14 samples, 9.59%)</title><rect x="858.6" y="341" width="113.2" height="15.0" fill="rgb(234,6,13)" rx="2" ry="2" />
+<text  x="861.63" y="351.5" >__pthread_onc..</text>
+</g>
+<g >
+<title>__pthread_mutex_unlock_usercnt(decr=1, (1 samples, 0.68%)</title><rect x="769.7" y="101" width="8.1" height="15.0" fill="rgb(246,25,8)" rx="2" ry="2" />
+<text  x="772.73" y="111.5" ></text>
+</g>
+<g >
+<title>__gthread_mutex_unlock(__mutex=0x56159be373a0) (1 samples, 0.68%)</title><rect x="228.2" y="133" width="8.1" height="15.0" fill="rgb(253,20,51)" rx="2" ry="2" />
+<text  x="231.22" y="143.5" ></text>
+</g>
+<g >
+<title>std::__invoke_impl&lt;std::pair&lt;double, (13 samples, 8.90%)</title><rect x="640.4" y="213" width="105.1" height="15.0" fill="rgb(245,153,34)" rx="2" ry="2" />
+<text  x="643.41" y="223.5" >std::__invok..</text>
+</g>
+<g >
+<title>std::allocator_traits&lt;std::allocator&lt;std::__detail::_Hash_node&lt;std::pair&lt;PageId (1 samples, 0.68%)</title><rect x="1157.7" y="389" width="8.1" height="15.0" fill="rgb(249,127,49)" rx="2" ry="2" />
+<text  x="1160.67" y="399.5" ></text>
+</g>
+<g >
+<title>__pthread_clockjoin_ex (4 samples, 2.74%)</title><rect x="1076.8" y="325" width="32.4" height="15.0" fill="rgb(211,195,46)" rx="2" ry="2" />
+<text  x="1079.85" y="335.5" >__..</text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.68%)</title><rect x="1028.4" y="373" width="8.0" height="15.0" fill="rgb(218,194,9)" rx="2" ry="2" />
+<text  x="1031.36" y="383.5" ></text>
+</g>
+<g >
+<title>std::mutex::lock (2 samples, 1.37%)</title><rect x="82.7" y="149" width="16.2" height="15.0" fill="rgb(237,220,28)" rx="2" ry="2" />
+<text  x="85.74" y="159.5" ></text>
+</g>
+<g >
+<title>__GI___pthread_mutex_lock(mutex=0x56159be372f8) (1 samples, 0.68%)</title><rect x="195.9" y="117" width="8.1" height="15.0" fill="rgb(249,148,25)" rx="2" ry="2" />
+<text  x="198.89" y="127.5" ></text>
+</g>
+<g >
+<title>__pthread_once_slow(once_control=0x56159be374c8, (4 samples, 2.74%)</title><rect x="1076.8" y="357" width="32.4" height="15.0" fill="rgb(228,49,47)" rx="2" ry="2" />
+<text  x="1079.85" y="367.5" >__..</text>
+</g>
+<g >
+<title>std::__detail::_Hashtable_alloc&lt;std::allocator&lt;std::__detail::_Hash_node&lt;std::pair&lt;PageId (1 samples, 0.68%)</title><rect x="1157.7" y="405" width="8.1" height="15.0" fill="rgb(227,185,25)" rx="2" ry="2" />
+<text  x="1160.67" y="415.5" ></text>
+</g>
+<g >
+<title>std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 9.59%)</title><rect x="301.0" y="261" width="113.1" height="15.0" fill="rgb(209,215,31)" rx="2" ry="2" />
+<text  x="303.96" y="271.5" >std::thread::..</text>
+</g>
+<g >
+<title>__gthread_mutex_lock(__mutex=0x56159be37448) (1 samples, 0.68%)</title><rect x="90.8" y="133" width="8.1" height="15.0" fill="rgb(253,141,45)" rx="2" ry="2" />
+<text  x="93.82" y="143.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::AtomicIterator&lt;std::__detail::_Node_iterator&lt;std::pair&lt;PageId (6 samples, 4.11%)</title><rect x="195.9" y="181" width="48.5" height="15.0" fill="rgb(223,183,54)" rx="2" ry="2" />
+<text  x="198.89" y="191.5" >Mult..</text>
+</g>
+<g >
+<title>__lll_lock_wait (1 samples, 0.68%)</title><rect x="866.7" y="101" width="8.1" height="15.0" fill="rgb(218,108,53)" rx="2" ry="2" />
+<text  x="869.71" y="111.5" ></text>
+</g>
+<g >
+<title>start_thread(arg=&lt;optimized (110 samples, 75.34%)</title><rect x="82.7" y="517" width="889.1" height="15.0" fill="rgb(253,71,29)" rx="2" ry="2" />
+<text  x="85.74" y="527.5" >start_thread(arg=&lt;optimized</text>
+</g>
+<g >
+<title>std::__detail::_Map_base&lt;PageId,std::pair&lt;PageId (2 samples, 1.37%)</title><rect x="1060.7" y="453" width="16.1" height="15.0" fill="rgb(242,145,37)" rx="2" ry="2" />
+<text  x="1063.68" y="463.5" ></text>
+</g>
+<g >
+<title>std::__future_base::_State_baseV2::_M_do_set(std::function&lt;std::unique_ptr&lt;std::__future_base::_Result_base, (14 samples, 9.59%)</title><rect x="82.7" y="325" width="113.2" height="15.0" fill="rgb(231,129,6)" rx="2" ry="2" />
+<text  x="85.74" y="335.5" >std::__future..</text>
+</g>
+<g >
+<title>std::_Hashtable&lt;PageId, (2 samples, 1.37%)</title><rect x="1044.5" y="437" width="16.2" height="15.0" fill="rgb(209,110,37)" rx="2" ry="2" />
+<text  x="1047.52" y="447.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 9.59%)</title><rect x="414.1" y="197" width="113.2" height="15.0" fill="rgb(239,194,27)" rx="2" ry="2" />
+<text  x="417.11" y="207.5" >MultiThreaded..</text>
+</g>
+<g >
+<title>std::__basic_future&lt;std::pair&lt;double, (6 samples, 4.11%)</title><rect x="26.2" y="501" width="48.5" height="15.0" fill="rgb(236,11,24)" rx="2" ry="2" />
+<text  x="29.16" y="511.5" >std:..</text>
+</g>
+<g >
+<title>std::__invoke&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 9.59%)</title><rect x="527.3" y="229" width="113.1" height="15.0" fill="rgb(251,149,21)" rx="2" ry="2" />
+<text  x="530.26" y="239.5" >std::__invoke..</text>
+</g>
+<g >
+<title>std::pair&lt;PageId (1 samples, 0.68%)</title><rect x="1028.4" y="469" width="8.0" height="15.0" fill="rgb(224,162,39)" rx="2" ry="2" />
+<text  x="1031.36" y="479.5" ></text>
+</g>
+<g >
+<title>std::_Hashtable&lt;PageId, (3 samples, 2.05%)</title><rect x="1141.5" y="453" width="24.3" height="15.0" fill="rgb(247,7,30)" rx="2" ry="2" />
+<text  x="1144.51" y="463.5" >s..</text>
+</g>
+<g >
+<title>__lll_lock_wait (1 samples, 0.68%)</title><rect x="688.9" y="101" width="8.1" height="15.0" fill="rgb(243,105,23)" rx="2" ry="2" />
+<text  x="691.90" y="111.5" ></text>
+</g>
+<g >
+<title>??() (1 samples, 0.68%)</title><rect x="10.0" y="501" width="8.1" height="15.0" fill="rgb(238,98,19)" rx="2" ry="2" />
+<text  x="13.00" y="511.5" ></text>
+</g>
+<g >
+<title>__pthread_once_slow(once_control=0x56159be37b28, (14 samples, 9.59%)</title><rect x="745.5" y="341" width="113.1" height="15.0" fill="rgb(245,144,23)" rx="2" ry="2" />
+<text  x="748.48" y="351.5" >__pthread_onc..</text>
+</g>
+<g >
+<title>std::__future_base::_Task_setter&lt;std::unique_ptr&lt;std::__future_base::_Result&lt;std::pair&lt;double, (14 samples, 9.59%)</title><rect x="301.0" y="277" width="113.1" height="15.0" fill="rgb(226,54,29)" rx="2" ry="2" />
+<text  x="303.96" y="287.5" >std::__future..</text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::initPages (4 samples, 2.74%)</title><rect x="1044.5" y="485" width="32.3" height="15.0" fill="rgb(219,62,19)" rx="2" ry="2" />
+<text  x="1047.52" y="495.5" >Mu..</text>
+</g>
+<g >
+<title>std::__invoke_impl&lt;std::pair&lt;double, (14 samples, 9.59%)</title><rect x="301.0" y="213" width="113.1" height="15.0" fill="rgb(247,136,39)" rx="2" ry="2" />
+<text  x="303.96" y="223.5" >std::__invoke..</text>
+</g>
+<g >
+<title>__lll_lock_wait (1 samples, 0.68%)</title><rect x="745.5" y="101" width="8.1" height="15.0" fill="rgb(216,138,0)" rx="2" ry="2" />
+<text  x="748.48" y="111.5" ></text>
+</g>
+<g >
+<title>std::__invoke&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 9.59%)</title><rect x="414.1" y="229" width="113.2" height="15.0" fill="rgb(213,18,1)" rx="2" ry="2" />
+<text  x="417.11" y="239.5" >std::__invoke..</text>
+</g>
+<g >
+<title>__gthread_mutex_lock(__mutex=0x56159be37330) (1 samples, 0.68%)</title><rect x="527.3" y="133" width="8.0" height="15.0" fill="rgb(254,73,12)" rx="2" ry="2" />
+<text  x="530.26" y="143.5" ></text>
+</g>
+<g >
+<title>std::_Hash_bytes(voidconst*, (1 samples, 0.68%)</title><rect x="381.8" y="85" width="8.1" height="15.0" fill="rgb(228,197,44)" rx="2" ry="2" />
+<text  x="384.78" y="95.5" ></text>
+</g>
+<g >
+<title>std::function&lt;std::unique_ptr&lt;std::__future_base::_Result_base,std::__future_base::_Result_base::_Deleter&gt; (13 samples, 8.90%)</title><rect x="640.4" y="309" width="105.1" height="15.0" fill="rgb(254,184,29)" rx="2" ry="2" />
+<text  x="643.41" y="319.5" >std::functio..</text>
+</g>
+<g >
+<title>clone (1 samples, 0.68%)</title><rect x="10.0" y="485" width="8.1" height="15.0" fill="rgb(249,2,3)" rx="2" ry="2" />
+<text  x="13.00" y="495.5" ></text>
+</g>
+<g >
+<title>__pthread_once_slow(once_control=0x56159be374b8, (14 samples, 9.59%)</title><rect x="82.7" y="341" width="113.2" height="15.0" fill="rgb(250,76,29)" rx="2" ry="2" />
+<text  x="85.74" y="351.5" >__pthread_onc..</text>
+</g>
+<g >
+<title>std::lock_guard&lt;std::mutex&gt;::~lock_guard (1 samples, 0.68%)</title><rect x="769.7" y="165" width="8.1" height="15.0" fill="rgb(253,103,31)" rx="2" ry="2" />
+<text  x="772.73" y="175.5" ></text>
+</g>
+<g >
+<title>__pthread_once_slow(once_control=0x56159be376e8, (14 samples, 9.59%)</title><rect x="414.1" y="341" width="113.2" height="15.0" fill="rgb(243,141,14)" rx="2" ry="2" />
+<text  x="417.11" y="351.5" >__pthread_onc..</text>
+</g>
+<g >
+<title>std::unordered_map&lt;PageId, (3 samples, 2.05%)</title><rect x="373.7" y="181" width="24.2" height="15.0" fill="rgb(222,105,11)" rx="2" ry="2" />
+<text  x="376.70" y="191.5" >s..</text>
+</g>
+<g >
+<title>std::_Function_handler&lt;std::unique_ptr&lt;std::__future_base::_Result_base,std::__future_base::_Result_base::_Deleter&gt; (14 samples, 9.59%)</title><rect x="414.1" y="293" width="113.2" height="15.0" fill="rgb(235,33,35)" rx="2" ry="2" />
+<text  x="417.11" y="303.5" >std::_Functio..</text>
+</g>
+<g >
+<title>std::__future_base::_State_baseV2::wait(this=0x56159be374a0) (3 samples, 2.05%)</title><rect x="26.2" y="485" width="24.2" height="15.0" fill="rgb(224,71,17)" rx="2" ry="2" />
+<text  x="29.16" y="495.5" >s..</text>
+</g>
+<g >
+<title>std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 9.59%)</title><rect x="527.3" y="245" width="113.1" height="15.0" fill="rgb(236,229,22)" rx="2" ry="2" />
+<text  x="530.26" y="255.5" >std::thread::..</text>
+</g>
+<g >
+<title>__GI___pthread_mutex_unlock (1 samples, 0.68%)</title><rect x="107.0" y="117" width="8.1" height="15.0" fill="rgb(250,89,3)" rx="2" ry="2" />
+<text  x="109.99" y="127.5" ></text>
+</g>
+<g >
+<title>std::mutex::lock (3 samples, 2.05%)</title><rect x="745.5" y="149" width="24.2" height="15.0" fill="rgb(254,50,49)" rx="2" ry="2" />
+<text  x="748.48" y="159.5" >s..</text>
+</g>
+<g >
+<title>__gthread_mutex_unlock(__mutex=0x56159be373a0) (1 samples, 0.68%)</title><rect x="107.0" y="133" width="8.1" height="15.0" fill="rgb(230,133,4)" rx="2" ry="2" />
+<text  x="109.99" y="143.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;PageIdAndRank, (1 samples, 0.68%)</title><rect x="1181.9" y="501" width="8.1" height="15.0" fill="rgb(249,225,0)" rx="2" ry="2" />
+<text  x="1184.92" y="511.5" ></text>
+</g>
+<g >
+<title>__gthread_mutex_lock(__mutex=0x56159be373a0) (1 samples, 0.68%)</title><rect x="414.1" y="133" width="8.1" height="15.0" fill="rgb(221,218,44)" rx="2" ry="2" />
+<text  x="417.11" y="143.5" ></text>
+</g>
+<g >
+<title>std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 9.59%)</title><rect x="858.6" y="261" width="113.2" height="15.0" fill="rgb(237,41,46)" rx="2" ry="2" />
+<text  x="861.63" y="271.5" >std::thread::..</text>
+</g>
+<g >
+<title>munmap() (1 samples, 0.68%)</title><rect x="1165.8" y="389" width="8.0" height="15.0" fill="rgb(230,74,30)" rx="2" ry="2" />
+<text  x="1168.75" y="399.5" ></text>
+</g>
+<g >
+<title>__vsnprintf_internal(string=0x7ffe9048f370 (1 samples, 0.68%)</title><rect x="1173.8" y="421" width="8.1" height="15.0" fill="rgb(230,149,50)" rx="2" ry="2" />
+<text  x="1176.84" y="431.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 9.59%)</title><rect x="527.3" y="197" width="113.1" height="15.0" fill="rgb(243,106,30)" rx="2" ry="2" />
+<text  x="530.26" y="207.5" >MultiThreaded..</text>
+</g>
+<g >
+<title>__gthread_mutex_lock(__mutex=0x56159be37448) (1 samples, 0.68%)</title><rect x="688.9" y="133" width="8.1" height="15.0" fill="rgb(213,184,21)" rx="2" ry="2" />
+<text  x="691.90" y="143.5" ></text>
+</g>
+<g >
+<title>std::__detail::_Hash_code_base&lt;PageId, (1 samples, 0.68%)</title><rect x="947.5" y="149" width="8.1" height="15.0" fill="rgb(214,20,1)" rx="2" ry="2" />
+<text  x="950.53" y="159.5" ></text>
+</g>
+<g >
+<title>__lll_lock_wait (1 samples, 0.68%)</title><rect x="858.6" y="101" width="8.1" height="15.0" fill="rgb(220,102,31)" rx="2" ry="2" />
+<text  x="861.63" y="111.5" ></text>
+</g>
+<g >
+<title>std::__invoke&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 9.59%)</title><rect x="858.6" y="229" width="113.2" height="15.0" fill="rgb(227,177,52)" rx="2" ry="2" />
+<text  x="861.63" y="239.5" >std::__invoke..</text>
+</g>
+<g >
+<title>std::__detail::_Hash_code_base&lt;PageId, (1 samples, 0.68%)</title><rect x="381.8" y="149" width="8.1" height="15.0" fill="rgb(250,209,36)" rx="2" ry="2" />
+<text  x="384.78" y="159.5" ></text>
+</g>
+<g >
+<title>std::function&lt;std::unique_ptr&lt;std::__future_base::_Result_base,std::__future_base::_Result_base::_Deleter&gt; (13 samples, 8.90%)</title><rect x="195.9" y="309" width="105.1" height="15.0" fill="rgb(220,111,21)" rx="2" ry="2" />
+<text  x="198.89" y="319.5" >std::functio..</text>
+</g>
+<g >
+<title>std::_Vector_base&lt;Page, (1 samples, 0.68%)</title><rect x="1165.8" y="437" width="8.0" height="15.0" fill="rgb(215,36,9)" rx="2" ry="2" />
+<text  x="1168.75" y="447.5" ></text>
+</g>
+<g >
+<title>std::__invoke_impl&lt;std::pair&lt;double, (13 samples, 8.90%)</title><rect x="195.9" y="213" width="105.1" height="15.0" fill="rgb(209,1,50)" rx="2" ry="2" />
+<text  x="198.89" y="223.5" >std::__invok..</text>
+</g>
+<g >
+<title>__lll_lock_wait (1 samples, 0.68%)</title><rect x="90.8" y="101" width="8.1" height="15.0" fill="rgb(205,145,35)" rx="2" ry="2" />
+<text  x="93.82" y="111.5" ></text>
+</g>
+<g >
+<title>PageIdHash::operator() (1 samples, 0.68%)</title><rect x="947.5" y="133" width="8.1" height="15.0" fill="rgb(206,190,52)" rx="2" ry="2" />
+<text  x="950.53" y="143.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::AtomicIterator&lt;std::__detail::_Node_iterator&lt;std::pair&lt;PageIdconst, (10 samples, 6.85%)</title><rect x="438.4" y="181" width="80.8" height="15.0" fill="rgb(220,36,33)" rx="2" ry="2" />
+<text  x="441.36" y="191.5" >MultiThre..</text>
+</g>
+<g >
+<title>__gthread_once(__func=&lt;optimized (4 samples, 2.74%)</title><rect x="1076.8" y="373" width="32.4" height="15.0" fill="rgb(222,44,26)" rx="2" ry="2" />
+<text  x="1079.85" y="383.5" >__..</text>
+</g>
+<g >
+<title>__gthread_mutex_lock(__mutex=0x56159be373d8) (1 samples, 0.68%)</title><rect x="317.1" y="133" width="8.1" height="15.0" fill="rgb(229,45,42)" rx="2" ry="2" />
+<text  x="320.12" y="143.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::AtomicIterator&lt;std::__detail::_Node_iterator&lt;std::pair&lt;PageIdconst, (8 samples, 5.48%)</title><rect x="874.8" y="181" width="64.7" height="15.0" fill="rgb(207,68,52)" rx="2" ry="2" />
+<text  x="877.79" y="191.5" >MultiTh..</text>
+</g>
+<g >
+<title>std::call_once&lt;void (3 samples, 2.05%)</title><rect x="26.2" y="437" width="24.2" height="15.0" fill="rgb(210,49,10)" rx="2" ry="2" />
+<text  x="29.16" y="447.5" >s..</text>
+</g>
+<g >
+<title>std::equal_to&lt;PageId&gt;::operator() (2 samples, 1.37%)</title><rect x="1044.5" y="373" width="16.2" height="15.0" fill="rgb(210,92,10)" rx="2" ry="2" />
+<text  x="1047.52" y="383.5" ></text>
+</g>
+<g >
+<title>__GI___pthread_mutex_lock(mutex=0x56159be373d8) (1 samples, 0.68%)</title><rect x="82.7" y="117" width="8.1" height="15.0" fill="rgb(227,194,3)" rx="2" ry="2" />
+<text  x="85.74" y="127.5" ></text>
+</g>
+<g >
+<title>std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 9.59%)</title><rect x="527.3" y="261" width="113.1" height="15.0" fill="rgb(208,24,20)" rx="2" ry="2" />
+<text  x="530.26" y="271.5" >std::thread::..</text>
+</g>
+<g >
+<title>std::__future_base::_Async_state_commonV2::_M_join (3 samples, 2.05%)</title><rect x="50.4" y="453" width="24.3" height="15.0" fill="rgb(230,178,50)" rx="2" ry="2" />
+<text  x="53.41" y="463.5" >s..</text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;,std::unordered_map&lt;PageId, (1 samples, 0.68%)</title><rect x="737.4" y="197" width="8.1" height="15.0" fill="rgb(223,96,34)" rx="2" ry="2" />
+<text  x="740.40" y="207.5" ></text>
+</g>
+<g >
+<title>vsnprintf(__ap=0x7ffe9048f390, (1 samples, 0.68%)</title><rect x="1173.8" y="437" width="8.1" height="15.0" fill="rgb(252,111,8)" rx="2" ry="2" />
+<text  x="1176.84" y="447.5" ></text>
+</g>
+<g >
+<title>std::call_once&lt;void (4 samples, 2.74%)</title><rect x="1076.8" y="389" width="32.4" height="15.0" fill="rgb(231,56,33)" rx="2" ry="2" />
+<text  x="1079.85" y="399.5" >st..</text>
+</g>
+<g >
+<title>std::_Function_handler&lt;std::unique_ptr&lt;std::__future_base::_Result_base,std::__future_base::_Result_base::_Deleter&gt; (14 samples, 9.59%)</title><rect x="82.7" y="293" width="113.2" height="15.0" fill="rgb(227,125,12)" rx="2" ry="2" />
+<text  x="85.74" y="303.5" >std::_Functio..</text>
+</g>
+<g >
+<title>__pthread_clockjoin_ex (4 samples, 2.74%)</title><rect x="1109.2" y="325" width="32.3" height="15.0" fill="rgb(206,64,6)" rx="2" ry="2" />
+<text  x="1112.18" y="335.5" >__..</text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::AtomicIterator&lt;std::__detail::_Node_iterator&lt;std::pair&lt;PageId (2 samples, 1.37%)</title><rect x="858.6" y="181" width="16.2" height="15.0" fill="rgb(223,134,26)" rx="2" ry="2" />
+<text  x="861.63" y="191.5" ></text>
+</g>
+<g >
+<title>pageRankComputationWithNumNodes(num=500000, (26 samples, 17.81%)</title><rect x="971.8" y="517" width="210.1" height="15.0" fill="rgb(218,218,12)" rx="2" ry="2" />
+<text  x="974.78" y="527.5" >pageRankComputationWithNumN..</text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.68%)</title><rect x="1028.4" y="437" width="8.0" height="15.0" fill="rgb(240,115,2)" rx="2" ry="2" />
+<text  x="1031.36" y="447.5" ></text>
+</g>
+<g >
+<title>std::__basic_future&lt;std::pair&lt;double, (8 samples, 5.48%)</title><rect x="1076.8" y="453" width="64.7" height="15.0" fill="rgb(223,213,48)" rx="2" ry="2" />
+<text  x="1079.85" y="463.5" >std::__..</text>
+</g>
+<g >
+<title>_int_free(av=0x7fdd1220bb80 (1 samples, 0.68%)</title><rect x="1181.9" y="421" width="8.1" height="15.0" fill="rgb(254,146,8)" rx="2" ry="2" />
+<text  x="1184.92" y="431.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::AtomicIterator&lt;std::__detail::_Node_iterator&lt;std::pair&lt;PageIdconst, (9 samples, 6.16%)</title><rect x="777.8" y="181" width="72.7" height="15.0" fill="rgb(224,218,48)" rx="2" ry="2" />
+<text  x="780.81" y="191.5" >MultiThr..</text>
+</g>
+<g >
+<title>__gthread_mutex_lock(__mutex=0x56159be373a0) (1 samples, 0.68%)</title><rect x="309.0" y="133" width="8.1" height="15.0" fill="rgb(236,53,39)" rx="2" ry="2" />
+<text  x="312.04" y="143.5" ></text>
+</g>
+<g >
+<title>std::mutex::lock (4 samples, 2.74%)</title><rect x="527.3" y="149" width="32.3" height="15.0" fill="rgb(250,3,25)" rx="2" ry="2" />
+<text  x="530.26" y="159.5" >st..</text>
+</g>
+<g >
+<title>std::_Function_handler&lt;std::unique_ptr&lt;std::__future_base::_Result_base,std::__future_base::_Result_base::_Deleter&gt; (14 samples, 9.59%)</title><rect x="858.6" y="293" width="113.2" height="15.0" fill="rgb(211,178,50)" rx="2" ry="2" />
+<text  x="861.63" y="303.5" >std::_Functio..</text>
+</g>
+<g >
+<title>PageIdAndRank::PageIdAndRank (1 samples, 0.68%)</title><rect x="1036.4" y="405" width="8.1" height="15.0" fill="rgb(221,96,47)" rx="2" ry="2" />
+<text  x="1039.44" y="415.5" ></text>
+</g>
+<g >
+<title>std::equal_to&lt;PageId&gt;::operator() (1 samples, 0.68%)</title><rect x="850.5" y="101" width="8.1" height="15.0" fill="rgb(209,62,33)" rx="2" ry="2" />
+<text  x="853.55" y="111.5" ></text>
+</g>
+<g >
+<title>std::__future_base::_State_baseV2::_M_do_set(std::function&lt;std::unique_ptr&lt;std::__future_base::_Result_base, (14 samples, 9.59%)</title><rect x="858.6" y="325" width="113.2" height="15.0" fill="rgb(251,125,15)" rx="2" ry="2" />
+<text  x="861.63" y="335.5" >std::__future..</text>
+</g>
+<g >
+<title>__lll_lock_wait (2 samples, 1.37%)</title><rect x="204.0" y="101" width="16.1" height="15.0" fill="rgb(247,53,43)" rx="2" ry="2" />
+<text  x="206.97" y="111.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::AtomicIterator&lt;std::__detail::_Node_iterator&lt;std::pair&lt;PageId (3 samples, 2.05%)</title><rect x="301.0" y="181" width="24.2" height="15.0" fill="rgb(216,11,5)" rx="2" ry="2" />
+<text  x="303.96" y="191.5" >M..</text>
+</g>
+<g >
+<title>_int_free(av=0x7fdd1220bb80 (1 samples, 0.68%)</title><rect x="1157.7" y="357" width="8.1" height="15.0" fill="rgb(206,207,47)" rx="2" ry="2" />
+<text  x="1160.67" y="367.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;Page, (1 samples, 0.68%)</title><rect x="1165.8" y="453" width="8.0" height="15.0" fill="rgb(210,187,12)" rx="2" ry="2" />
+<text  x="1168.75" y="463.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::AtomicIterator&lt;std::__detail::_Node_iterator&lt;std::pair&lt;PageId (5 samples, 3.42%)</title><rect x="82.7" y="181" width="40.5" height="15.0" fill="rgb(230,134,45)" rx="2" ry="2" />
+<text  x="85.74" y="191.5" >Mul..</text>
+</g>
+<g >
+<title>__lll_lock_wait (1 samples, 0.68%)</title><rect x="527.3" y="101" width="8.0" height="15.0" fill="rgb(240,129,18)" rx="2" ry="2" />
+<text  x="530.26" y="111.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;Page,std::allocator&lt;Page&gt; (1 samples, 0.68%)</title><rect x="1165.8" y="469" width="8.0" height="15.0" fill="rgb(212,139,28)" rx="2" ry="2" />
+<text  x="1168.75" y="479.5" ></text>
+</g>
+<g >
+<title>__GI___sbrk(increment=-60940288) (1 samples, 0.68%)</title><rect x="1181.9" y="357" width="8.1" height="15.0" fill="rgb(240,20,18)" rx="2" ry="2" />
+<text  x="1184.92" y="367.5" ></text>
+</g>
+<g >
+<title>std::lock_guard&lt;std::mutex&gt;::~lock_guard (1 samples, 0.68%)</title><rect x="430.3" y="165" width="8.1" height="15.0" fill="rgb(208,91,37)" rx="2" ry="2" />
+<text  x="433.27" y="175.5" ></text>
+</g>
+<g >
+<title>__brk (1 samples, 0.68%)</title><rect x="1181.9" y="341" width="8.1" height="15.0" fill="rgb(209,93,8)" rx="2" ry="2" />
+<text  x="1184.92" y="351.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;PageIdAndRank, (1 samples, 0.68%)</title><rect x="1036.4" y="453" width="8.1" height="15.0" fill="rgb(235,124,52)" rx="2" ry="2" />
+<text  x="1039.44" y="463.5" ></text>
+</g>
+<g >
+<title>std::char_traits&lt;char&gt;::compare(__n=&lt;optimized (1 samples, 0.68%)</title><rect x="850.5" y="53" width="8.1" height="15.0" fill="rgb(206,38,30)" rx="2" ry="2" />
+<text  x="853.55" y="63.5" ></text>
+</g>
+<g >
+<title>std::__future_base::_Task_setter&lt;std::unique_ptr&lt;std::__future_base::_Result&lt;std::pair&lt;double, (14 samples, 9.59%)</title><rect x="745.5" y="277" width="113.1" height="15.0" fill="rgb(238,217,33)" rx="2" ry="2" />
+<text  x="748.48" y="287.5" >std::__future..</text>
+</g>
+<g >
+<title>std::__detail::_Hashtable_alloc&lt;std::allocator&lt;std::__detail::_Hash_node&lt;std::pair&lt;PageId (1 samples, 0.68%)</title><rect x="1157.7" y="421" width="8.1" height="15.0" fill="rgb(241,119,30)" rx="2" ry="2" />
+<text  x="1160.67" y="431.5" ></text>
+</g>
+<g >
+<title>std::lock_guard&lt;std::mutex&gt;::lock_guard (4 samples, 2.74%)</title><rect x="527.3" y="165" width="32.3" height="15.0" fill="rgb(247,62,30)" rx="2" ry="2" />
+<text  x="530.26" y="175.5" >st..</text>
+</g>
+<g >
+<title>__pthread_mutex_unlock_usercnt (1 samples, 0.68%)</title><rect x="236.3" y="101" width="8.1" height="15.0" fill="rgb(253,32,6)" rx="2" ry="2" />
+<text  x="239.30" y="111.5" ></text>
+</g>
+<g >
+<title>__pthread_mutex_unlock_usercnt (1 samples, 0.68%)</title><rect x="107.0" y="101" width="8.1" height="15.0" fill="rgb(209,209,16)" rx="2" ry="2" />
+<text  x="109.99" y="111.5" ></text>
+</g>
+<g >
+<title>__pthread_mutex_unlock_usercnt(decr=1, (1 samples, 0.68%)</title><rect x="98.9" y="101" width="8.1" height="15.0" fill="rgb(216,0,13)" rx="2" ry="2" />
+<text  x="101.90" y="111.5" ></text>
+</g>
+<g >
+<title>malloc_consolidate (1 samples, 0.68%)</title><rect x="1141.5" y="357" width="8.1" height="15.0" fill="rgb(223,216,29)" rx="2" ry="2" />
+<text  x="1144.51" y="367.5" ></text>
+</g>
+<g >
+<title>__gthread_mutex_unlock(__mutex=0x56159be373d8) (1 samples, 0.68%)</title><rect x="697.0" y="133" width="8.1" height="15.0" fill="rgb(242,196,46)" rx="2" ry="2" />
+<text  x="699.99" y="143.5" ></text>
+</g>
+<g >
+<title>std::__future_base::_Async_state_commonV2::_M_complete_async (3 samples, 2.05%)</title><rect x="26.2" y="469" width="24.2" height="15.0" fill="rgb(244,77,32)" rx="2" ry="2" />
+<text  x="29.16" y="479.5" >s..</text>
+</g>
+<g >
+<title>__GI___pthread_mutex_unlock (1 samples, 0.68%)</title><rect x="430.3" y="117" width="8.1" height="15.0" fill="rgb(208,104,26)" rx="2" ry="2" />
+<text  x="433.27" y="127.5" ></text>
+</g>
+<g >
+<title>std::_Hashtable&lt;PageId, (1 samples, 0.68%)</title><rect x="850.5" y="165" width="8.1" height="15.0" fill="rgb(227,17,17)" rx="2" ry="2" />
+<text  x="853.55" y="175.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char,std::char_traits&lt;char&gt;, (1 samples, 0.68%)</title><rect x="18.1" y="437" width="8.1" height="15.0" fill="rgb(213,192,53)" rx="2" ry="2" />
+<text  x="21.08" y="447.5" ></text>
+</g>
+<g >
+<title>__lll_lock_wait (1 samples, 0.68%)</title><rect x="317.1" y="101" width="8.1" height="15.0" fill="rgb(233,2,14)" rx="2" ry="2" />
+<text  x="320.12" y="111.5" ></text>
+</g>
+<g >
+<title>__pthread_once_slow(once_control=0x56159be37788, (14 samples, 9.59%)</title><rect x="527.3" y="341" width="113.1" height="15.0" fill="rgb(216,35,39)" rx="2" ry="2" />
+<text  x="530.26" y="351.5" >__pthread_onc..</text>
+</g>
+<g >
+<title>__GI___pthread_mutex_lock(mutex=0x56159be37448) (1 samples, 0.68%)</title><rect x="220.1" y="117" width="8.1" height="15.0" fill="rgb(207,215,29)" rx="2" ry="2" />
+<text  x="223.14" y="127.5" ></text>
+</g>
+<g >
+<title>std::thread::join()() (4 samples, 2.74%)</title><rect x="1076.8" y="341" width="32.4" height="15.0" fill="rgb(247,83,52)" rx="2" ry="2" />
+<text  x="1079.85" y="351.5" >st..</text>
+</g>
+<g >
+<title>__gthread_once(__func=&lt;optimized (3 samples, 2.05%)</title><rect x="26.2" y="421" width="24.2" height="15.0" fill="rgb(228,112,22)" rx="2" ry="2" />
+<text  x="29.16" y="431.5" >_..</text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;,std::unordered_map&lt;PageId, (1 samples, 0.68%)</title><rect x="292.9" y="197" width="8.1" height="15.0" fill="rgb(251,42,0)" rx="2" ry="2" />
+<text  x="295.88" y="207.5" ></text>
+</g>
+<g >
+<title>__GI___pthread_mutex_lock(mutex=0x56159be373d8) (1 samples, 0.68%)</title><rect x="317.1" y="117" width="8.1" height="15.0" fill="rgb(221,153,23)" rx="2" ry="2" />
+<text  x="320.12" y="127.5" ></text>
+</g>
+<g >
+<title>start_thread (1 samples, 0.68%)</title><rect x="74.7" y="517" width="8.0" height="15.0" fill="rgb(212,194,17)" rx="2" ry="2" />
+<text  x="77.66" y="527.5" ></text>
+</g>
+<g >
+<title>std::function&lt;std::unique_ptr&lt;std::__future_base::_Result_base,std::__future_base::_Result_base::_Deleter&gt; (14 samples, 9.59%)</title><rect x="414.1" y="309" width="113.2" height="15.0" fill="rgb(240,100,38)" rx="2" ry="2" />
+<text  x="417.11" y="319.5" >std::function..</text>
+</g>
+<g >
+<title>std::_Hash_bytes(voidconst*, (1 samples, 0.68%)</title><rect x="947.5" y="85" width="8.1" height="15.0" fill="rgb(207,128,28)" rx="2" ry="2" />
+<text  x="950.53" y="95.5" ></text>
+</g>
+<g >
+<title>PageId::PageId (1 samples, 0.68%)</title><rect x="1028.4" y="453" width="8.0" height="15.0" fill="rgb(245,219,16)" rx="2" ry="2" />
+<text  x="1031.36" y="463.5" ></text>
+</g>
+<g >
+<title>__memcmp_avx2_movbe (1 samples, 0.68%)</title><rect x="850.5" y="37" width="8.1" height="15.0" fill="rgb(218,164,23)" rx="2" ry="2" />
+<text  x="853.55" y="47.5" ></text>
+</g>
+<g >
+<title>std::allocator_traits&lt;std::allocator&lt;PageIdAndRank&gt; (1 samples, 0.68%)</title><rect x="1181.9" y="453" width="8.1" height="15.0" fill="rgb(235,224,35)" rx="2" ry="2" />
+<text  x="1184.92" y="463.5" ></text>
+</g>
+<g >
+<title>std::_Function_handler&lt;std::unique_ptr&lt;std::__future_base::_Result_base,std::__future_base::_Result_base::_Deleter&gt; (14 samples, 9.59%)</title><rect x="301.0" y="293" width="113.1" height="15.0" fill="rgb(248,165,49)" rx="2" ry="2" />
+<text  x="303.96" y="303.5" >std::_Functio..</text>
+</g>
+<g >
+<title>std::lock_guard&lt;std::mutex&gt;::~lock_guard (3 samples, 2.05%)</title><rect x="98.9" y="165" width="24.3" height="15.0" fill="rgb(249,83,8)" rx="2" ry="2" />
+<text  x="101.90" y="175.5" >s..</text>
+</g>
+<g >
+<title>clone() (111 samples, 76.03%)</title><rect x="74.7" y="533" width="897.1" height="15.0" fill="rgb(216,199,23)" rx="2" ry="2" />
+<text  x="77.66" y="543.5" >clone()</text>
+</g>
+<g >
+<title>__lll_lock_wait (1 samples, 0.68%)</title><rect x="664.7" y="101" width="8.0" height="15.0" fill="rgb(249,79,15)" rx="2" ry="2" />
+<text  x="667.66" y="111.5" ></text>
+</g>
+<g >
+<title>__pthread_once_slow(once_control=0x56159be374c8, (3 samples, 2.05%)</title><rect x="26.2" y="405" width="24.2" height="15.0" fill="rgb(238,32,3)" rx="2" ry="2" />
+<text  x="29.16" y="415.5" >_..</text>
+</g>
+<g >
+<title>std::lock_guard&lt;std::mutex&gt;::lock_guard (5 samples, 3.42%)</title><rect x="656.6" y="165" width="40.4" height="15.0" fill="rgb(218,104,3)" rx="2" ry="2" />
+<text  x="659.58" y="175.5" >std..</text>
+</g>
+<g >
+<title>__lll_lock_wait (1 samples, 0.68%)</title><rect x="220.1" y="101" width="8.1" height="15.0" fill="rgb(211,223,4)" rx="2" ry="2" />
+<text  x="223.14" y="111.5" ></text>
+</g>
+<g >
+<title>__gnu_cxx::new_allocator&lt;Page&gt;::deallocate(this=&lt;optimized (1 samples, 0.68%)</title><rect x="1165.8" y="405" width="8.0" height="15.0" fill="rgb(227,137,4)" rx="2" ry="2" />
+<text  x="1168.75" y="415.5" ></text>
+</g>
+<g >
+<title>std::lock_guard&lt;std::mutex&gt;::lock_guard (3 samples, 2.05%)</title><rect x="745.5" y="165" width="24.2" height="15.0" fill="rgb(235,40,33)" rx="2" ry="2" />
+<text  x="748.48" y="175.5" >s..</text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::generateResult (2 samples, 1.37%)</title><rect x="1028.4" y="485" width="16.1" height="15.0" fill="rgb(254,102,38)" rx="2" ry="2" />
+<text  x="1031.36" y="495.5" ></text>
+</g>
+<g >
+<title>std::mutex::unlock (1 samples, 0.68%)</title><rect x="430.3" y="149" width="8.1" height="15.0" fill="rgb(240,200,19)" rx="2" ry="2" />
+<text  x="433.27" y="159.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::computeForNetwork (24 samples, 16.44%)</title><rect x="971.8" y="501" width="194.0" height="15.0" fill="rgb(215,75,32)" rx="2" ry="2" />
+<text  x="974.78" y="511.5" >MultiThreadedPageRankComp..</text>
+</g>
+<g >
+<title>__pthread_once_slow(once_control=0x56159be375f8, (14 samples, 9.59%)</title><rect x="301.0" y="341" width="113.1" height="15.0" fill="rgb(223,195,32)" rx="2" ry="2" />
+<text  x="303.96" y="351.5" >__pthread_onc..</text>
+</g>
+<g >
+<title>__GI___default_morecore(increment=&lt;optimized (1 samples, 0.68%)</title><rect x="1181.9" y="389" width="8.1" height="15.0" fill="rgb(214,12,27)" rx="2" ry="2" />
+<text  x="1184.92" y="399.5" ></text>
+</g>
+<g >
+<title>std::unordered_map&lt;PageId, (3 samples, 2.05%)</title><rect x="1141.5" y="485" width="24.3" height="15.0" fill="rgb(249,139,7)" rx="2" ry="2" />
+<text  x="1144.51" y="495.5" >s..</text>
+</g>
+<g >
+<title>__GI___pthread_mutex_lock(mutex=0x56159be373a0) (1 samples, 0.68%)</title><rect x="672.7" y="117" width="8.1" height="15.0" fill="rgb(216,31,44)" rx="2" ry="2" />
+<text  x="675.74" y="127.5" ></text>
+</g>
+<g >
+<title>std::unordered_map&lt;PageId, (4 samples, 2.74%)</title><rect x="1044.5" y="469" width="32.3" height="15.0" fill="rgb(205,82,24)" rx="2" ry="2" />
+<text  x="1047.52" y="479.5" >st..</text>
+</g>
+<g >
+<title>std::thread::join()() (4 samples, 2.74%)</title><rect x="1109.2" y="341" width="32.3" height="15.0" fill="rgb(219,142,9)" rx="2" ry="2" />
+<text  x="1112.18" y="351.5" >st..</text>
+</g>
+<g >
+<title>__gthread_mutex_lock(__mutex=0x56159be37448) (1 samples, 0.68%)</title><rect x="866.7" y="133" width="8.1" height="15.0" fill="rgb(250,35,5)" rx="2" ry="2" />
+<text  x="869.71" y="143.5" ></text>
+</g>
+<g >
+<title>std::unordered_map&lt;PageId, (1 samples, 0.68%)</title><rect x="850.5" y="181" width="8.1" height="15.0" fill="rgb(244,53,28)" rx="2" ry="2" />
+<text  x="853.55" y="191.5" ></text>
+</g>
+<g >
+<title>__GI___pthread_mutex_lock(mutex=0x56159be37330) (1 samples, 0.68%)</title><rect x="527.3" y="117" width="8.0" height="15.0" fill="rgb(209,229,12)" rx="2" ry="2" />
+<text  x="530.26" y="127.5" ></text>
+</g>
+<g >
+<title>std::_Hashtable&lt;PageId,std::pair&lt;PageId (1 samples, 0.68%)</title><rect x="284.8" y="165" width="8.1" height="15.0" fill="rgb(208,63,13)" rx="2" ry="2" />
+<text  x="287.79" y="175.5" ></text>
+</g>
+<g >
+<title>std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 9.59%)</title><rect x="414.1" y="261" width="113.2" height="15.0" fill="rgb(227,206,12)" rx="2" ry="2" />
+<text  x="417.11" y="271.5" >std::thread::..</text>
+</g>
+<g >
+<title>std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (13 samples, 8.90%)</title><rect x="640.4" y="261" width="105.1" height="15.0" fill="rgb(233,84,27)" rx="2" ry="2" />
+<text  x="643.41" y="271.5" >std::thread:..</text>
+</g>
+<g >
+<title>__GI___pthread_mutex_lock(mutex=0x56159be373a0) (1 samples, 0.68%)</title><rect x="745.5" y="117" width="8.1" height="15.0" fill="rgb(238,92,25)" rx="2" ry="2" />
+<text  x="748.48" y="127.5" ></text>
+</g>
+<g >
+<title>std::__future_base::_State_baseV2::wait(this=0x56159be374a0) (4 samples, 2.74%)</title><rect x="1076.8" y="437" width="32.4" height="15.0" fill="rgb(248,98,17)" rx="2" ry="2" />
+<text  x="1079.85" y="447.5" >st..</text>
+</g>
+<g >
+<title>std::__detail::_Hashtable_base&lt;PageId, (1 samples, 0.68%)</title><rect x="850.5" y="133" width="8.1" height="15.0" fill="rgb(222,195,50)" rx="2" ry="2" />
+<text  x="853.55" y="143.5" ></text>
+</g>
+<g >
+<title>std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 9.59%)</title><rect x="414.1" y="245" width="113.2" height="15.0" fill="rgb(242,144,32)" rx="2" ry="2" />
+<text  x="417.11" y="255.5" >std::thread::..</text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (12 samples, 8.22%)</title><rect x="195.9" y="197" width="97.0" height="15.0" fill="rgb(242,66,28)" rx="2" ry="2" />
+<text  x="198.89" y="207.5" >MultiThread..</text>
+</g>
+<g >
+<title>std::unordered_map&lt;PageId, (1 samples, 0.68%)</title><rect x="284.8" y="181" width="8.1" height="15.0" fill="rgb(207,200,53)" rx="2" ry="2" />
+<text  x="287.79" y="191.5" ></text>
+</g>
+<g >
+<title>std::__future_base::_Async_state_impl&lt;std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (110 samples, 75.34%)</title><rect x="82.7" y="405" width="889.1" height="15.0" fill="rgb(245,1,32)" rx="2" ry="2" />
+<text  x="85.74" y="415.5" >std::__future_base::_Async_state_impl&lt;std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThre..</text>
+</g>
+<g >
+<title>std::__invoke_impl&lt;std::pair&lt;double, (14 samples, 9.59%)</title><rect x="745.5" y="213" width="113.1" height="15.0" fill="rgb(235,139,12)" rx="2" ry="2" />
+<text  x="748.48" y="223.5" >std::__invoke..</text>
+</g>
+<g >
+<title>__gthread_once(__func=&lt;optimized (3 samples, 2.05%)</title><rect x="50.4" y="421" width="24.3" height="15.0" fill="rgb(206,11,11)" rx="2" ry="2" />
+<text  x="53.41" y="431.5" >_..</text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 9.59%)</title><rect x="745.5" y="197" width="113.1" height="15.0" fill="rgb(250,190,53)" rx="2" ry="2" />
+<text  x="748.48" y="207.5" >MultiThreaded..</text>
+</g>
+<g >
+<title>__gthread_mutex_lock(__mutex=0x56159be37448) (1 samples, 0.68%)</title><rect x="761.6" y="133" width="8.1" height="15.0" fill="rgb(238,30,41)" rx="2" ry="2" />
+<text  x="764.64" y="143.5" ></text>
+</g>
+<g >
+<title>__gthread_mutex_unlock(__mutex=0x56159be372c0) (1 samples, 0.68%)</title><rect x="98.9" y="133" width="8.1" height="15.0" fill="rgb(230,115,26)" rx="2" ry="2" />
+<text  x="101.90" y="143.5" ></text>
+</g>
+<g >
+<title>std::_Hashtable&lt;PageId,std::pair&lt;PageId (1 samples, 0.68%)</title><rect x="389.9" y="165" width="8.0" height="15.0" fill="rgb(225,53,38)" rx="2" ry="2" />
+<text  x="392.86" y="175.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::AtomicIterator&lt;std::__detail::_Node_iterator&lt;std::pair&lt;PageId (8 samples, 5.48%)</title><rect x="640.4" y="181" width="64.7" height="15.0" fill="rgb(240,186,22)" rx="2" ry="2" />
+<text  x="643.41" y="191.5" >MultiTh..</text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::AtomicIterator&lt;std::__detail::_Node_iterator&lt;std::pair&lt;PageIdconst, (7 samples, 4.79%)</title><rect x="583.8" y="181" width="56.6" height="15.0" fill="rgb(242,28,8)" rx="2" ry="2" />
+<text  x="586.84" y="191.5" >Multi..</text>
+</g>
+<g >
+<title>__GI___pthread_mutex_lock(mutex=0x56159be373d8) (1 samples, 0.68%)</title><rect x="858.6" y="117" width="8.1" height="15.0" fill="rgb(241,104,48)" rx="2" ry="2" />
+<text  x="861.63" y="127.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (12 samples, 8.22%)</title><rect x="640.4" y="197" width="97.0" height="15.0" fill="rgb(210,119,46)" rx="2" ry="2" />
+<text  x="643.41" y="207.5" >MultiThread..</text>
+</g>
+<g >
+<title>__GI___pthread_mutex_unlock (1 samples, 0.68%)</title><rect x="697.0" y="117" width="8.1" height="15.0" fill="rgb(233,24,32)" rx="2" ry="2" />
+<text  x="699.99" y="127.5" ></text>
+</g>
+<g >
+<title>PageId::PageId (1 samples, 0.68%)</title><rect x="18.1" y="501" width="8.1" height="15.0" fill="rgb(218,134,36)" rx="2" ry="2" />
+<text  x="21.08" y="511.5" ></text>
+</g>
+<g >
+<title>__gthread_mutex_lock(__mutex=0x56159be37448) (1 samples, 0.68%)</title><rect x="220.1" y="133" width="8.1" height="15.0" fill="rgb(222,115,46)" rx="2" ry="2" />
+<text  x="223.14" y="143.5" ></text>
+</g>
+<g >
+<title>std::__invoke&lt;std::__future_base::_Async_state_impl&lt;std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (110 samples, 75.34%)</title><rect x="82.7" y="437" width="889.1" height="15.0" fill="rgb(238,83,6)" rx="2" ry="2" />
+<text  x="85.74" y="447.5" >std::__invoke&lt;std::__future_base::_Async_state_impl&lt;std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateR..</text>
+</g>
+<g >
+<title>std::operator==&lt;char&gt; (1 samples, 0.68%)</title><rect x="850.5" y="69" width="8.1" height="15.0" fill="rgb(248,227,24)" rx="2" ry="2" />
+<text  x="853.55" y="79.5" ></text>
+</g>
+<g >
+<title>std::_Hashtable&lt;PageId, (2 samples, 1.37%)</title><rect x="939.5" y="165" width="16.1" height="15.0" fill="rgb(241,67,25)" rx="2" ry="2" />
+<text  x="942.45" y="175.5" ></text>
+</g>
+<g >
+<title>__lll_lock_wait (1 samples, 0.68%)</title><rect x="422.2" y="101" width="8.1" height="15.0" fill="rgb(246,105,15)" rx="2" ry="2" />
+<text  x="425.19" y="111.5" ></text>
+</g>
+<g >
+<title>std::__invoke&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 9.59%)</title><rect x="301.0" y="229" width="113.1" height="15.0" fill="rgb(229,12,52)" rx="2" ry="2" />
+<text  x="303.96" y="239.5" >std::__invoke..</text>
+</g>
+<g >
+<title>Page::getId (1 samples, 0.68%)</title><rect x="18.1" y="517" width="8.1" height="15.0" fill="rgb(251,137,18)" rx="2" ry="2" />
+<text  x="21.08" y="527.5" ></text>
+</g>
+<g >
+<title>std::lock_guard&lt;std::mutex&gt;::~lock_guard (3 samples, 2.05%)</title><rect x="559.6" y="165" width="24.2" height="15.0" fill="rgb(216,84,21)" rx="2" ry="2" />
+<text  x="562.59" y="175.5" >s..</text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.68%)</title><rect x="18.1" y="485" width="8.1" height="15.0" fill="rgb(213,42,46)" rx="2" ry="2" />
+<text  x="21.08" y="495.5" ></text>
+</g>
+<g >
+<title>__lll_lock_wait (2 samples, 1.37%)</title><rect x="543.4" y="101" width="16.2" height="15.0" fill="rgb(232,101,1)" rx="2" ry="2" />
+<text  x="546.42" y="111.5" ></text>
+</g>
+<g >
+<title>main(argc=3, (27 samples, 18.49%)</title><rect x="971.8" y="533" width="218.2" height="15.0" fill="rgb(254,175,25)" rx="2" ry="2" />
+<text  x="974.78" y="543.5" >main(argc=3,</text>
+</g>
+<g >
+<title>std::thread::_Invoker&lt;std::tuple&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 9.59%)</title><rect x="82.7" y="261" width="113.2" height="15.0" fill="rgb(210,196,12)" rx="2" ry="2" />
+<text  x="85.74" y="271.5" >std::thread::..</text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.68%)</title><rect x="1028.4" y="389" width="8.0" height="15.0" fill="rgb(241,49,25)" rx="2" ry="2" />
+<text  x="1031.36" y="399.5" ></text>
+</g>
+<g >
+<title>std::call_once&lt;void (110 samples, 75.34%)</title><rect x="82.7" y="373" width="889.1" height="15.0" fill="rgb(242,2,6)" rx="2" ry="2" />
+<text  x="85.74" y="383.5" >std::call_once&lt;void</text>
+</g>
+<g >
+<title>__gthread_mutex_lock(__mutex=0x56159be373a0) (1 samples, 0.68%)</title><rect x="535.3" y="133" width="8.1" height="15.0" fill="rgb(237,146,36)" rx="2" ry="2" />
+<text  x="538.34" y="143.5" ></text>
+</g>
+<g >
+<title>__pthread_mutex_unlock_usercnt (1 samples, 0.68%)</title><rect x="228.2" y="101" width="8.1" height="15.0" fill="rgb(253,228,21)" rx="2" ry="2" />
+<text  x="231.22" y="111.5" ></text>
+</g>
+<g >
+<title>std::__future_base::_State_baseV2::wait(this=0x56159be37b10) (4 samples, 2.74%)</title><rect x="1109.2" y="437" width="32.3" height="15.0" fill="rgb(253,184,16)" rx="2" ry="2" />
+<text  x="1112.18" y="447.5" >st..</text>
+</g>
+<g >
+<title>std::function&lt;std::unique_ptr&lt;std::__future_base::_Result_base,std::__future_base::_Result_base::_Deleter&gt; (14 samples, 9.59%)</title><rect x="82.7" y="309" width="113.2" height="15.0" fill="rgb(235,185,37)" rx="2" ry="2" />
+<text  x="85.74" y="319.5" >std::function..</text>
+</g>
+<g >
+<title>__GI___pthread_mutex_unlock (1 samples, 0.68%)</title><rect x="228.2" y="117" width="8.1" height="15.0" fill="rgb(210,84,1)" rx="2" ry="2" />
+<text  x="231.22" y="127.5" ></text>
+</g>
+<g >
+<title>std::__invoke_impl&lt;std::pair&lt;double, (14 samples, 9.59%)</title><rect x="82.7" y="213" width="113.2" height="15.0" fill="rgb(218,91,19)" rx="2" ry="2" />
+<text  x="85.74" y="223.5" >std::__invoke..</text>
+</g>
+<g >
+<title>__pthread_mutex_unlock_usercnt (1 samples, 0.68%)</title><rect x="430.3" y="101" width="8.1" height="15.0" fill="rgb(240,193,53)" rx="2" ry="2" />
+<text  x="433.27" y="111.5" ></text>
+</g>
+<g >
+<title>std::__invoke_impl&lt;std::pair&lt;double, (14 samples, 9.59%)</title><rect x="414.1" y="213" width="113.2" height="15.0" fill="rgb(250,128,25)" rx="2" ry="2" />
+<text  x="417.11" y="223.5" >std::__invoke..</text>
+</g>
+<g >
+<title>std::function&lt;std::unique_ptr&lt;std::__future_base::_Result_base,std::__future_base::_Result_base::_Deleter&gt; (14 samples, 9.59%)</title><rect x="527.3" y="309" width="113.1" height="15.0" fill="rgb(245,96,25)" rx="2" ry="2" />
+<text  x="530.26" y="319.5" >std::function..</text>
+</g>
+<g >
+<title>std::allocator_traits&lt;std::allocator&lt;Page&gt; (1 samples, 0.68%)</title><rect x="1165.8" y="421" width="8.0" height="15.0" fill="rgb(231,26,18)" rx="2" ry="2" />
+<text  x="1168.75" y="431.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::AtomicIterator&lt;std::__detail::_Node_iterator&lt;std::pair&lt;PageId (7 samples, 4.79%)</title><rect x="527.3" y="181" width="56.5" height="15.0" fill="rgb(235,204,6)" rx="2" ry="2" />
+<text  x="530.26" y="191.5" >Multi..</text>
+</g>
+<g >
+<title>std::_Hashtable&lt;PageId, (2 samples, 1.37%)</title><rect x="1060.7" y="421" width="16.1" height="15.0" fill="rgb(208,185,45)" rx="2" ry="2" />
+<text  x="1063.68" y="431.5" ></text>
+</g>
+<g >
+<title>__lll_lock_wait (1 samples, 0.68%)</title><rect x="761.6" y="101" width="8.1" height="15.0" fill="rgb(238,33,6)" rx="2" ry="2" />
+<text  x="764.64" y="111.5" ></text>
+</g>
+<g >
+<title>std::_Hashtable&lt;PageId, (1 samples, 0.68%)</title><rect x="373.7" y="149" width="8.1" height="15.0" fill="rgb(250,44,47)" rx="2" ry="2" />
+<text  x="376.70" y="159.5" ></text>
+</g>
+<g >
+<title>__pthread_clockjoin_ex (3 samples, 2.05%)</title><rect x="50.4" y="373" width="24.3" height="15.0" fill="rgb(209,10,25)" rx="2" ry="2" />
+<text  x="53.41" y="383.5" >_..</text>
+</g>
+<g >
+<title>std::__future_base::_Task_setter&lt;std::unique_ptr&lt;std::__future_base::_Result&lt;std::pair&lt;double, (14 samples, 9.59%)</title><rect x="527.3" y="277" width="113.1" height="15.0" fill="rgb(215,23,27)" rx="2" ry="2" />
+<text  x="530.26" y="287.5" >std::__future..</text>
+</g>
+<g >
+<title>__gthread_mutex_lock(__mutex=0x56159be373d8) (1 samples, 0.68%)</title><rect x="680.8" y="133" width="8.1" height="15.0" fill="rgb(226,70,2)" rx="2" ry="2" />
+<text  x="683.82" y="143.5" ></text>
+</g>
+<g >
+<title>std::__future_base::_Async_state_commonV2::_M_complete_async (3 samples, 2.05%)</title><rect x="50.4" y="469" width="24.3" height="15.0" fill="rgb(227,167,19)" rx="2" ry="2" />
+<text  x="53.41" y="479.5" >s..</text>
+</g>
+<g >
+<title>std::__invoke&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (13 samples, 8.90%)</title><rect x="195.9" y="229" width="105.1" height="15.0" fill="rgb(243,69,8)" rx="2" ry="2" />
+<text  x="198.89" y="239.5" >std::__invok..</text>
+</g>
+<g >
+<title>std::_Hashtable&lt;PageId,std::pair&lt;PageId (1 samples, 0.68%)</title><rect x="519.2" y="165" width="8.1" height="15.0" fill="rgb(253,133,40)" rx="2" ry="2" />
+<text  x="522.18" y="175.5" ></text>
+</g>
+<g >
+<title>std::__invoke&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (13 samples, 8.90%)</title><rect x="640.4" y="229" width="105.1" height="15.0" fill="rgb(213,125,36)" rx="2" ry="2" />
+<text  x="643.41" y="239.5" >std::__invok..</text>
+</g>
+<g >
+<title>__pthread_once_slow(once_control=0x56159be37b38, (4 samples, 2.74%)</title><rect x="1109.2" y="357" width="32.3" height="15.0" fill="rgb(215,131,35)" rx="2" ry="2" />
+<text  x="1112.18" y="367.5" >__..</text>
+</g>
+<g >
+<title>__GI___pthread_mutex_unlock (2 samples, 1.37%)</title><rect x="559.6" y="117" width="16.2" height="15.0" fill="rgb(253,204,49)" rx="2" ry="2" />
+<text  x="562.59" y="127.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::updateRanks (8 samples, 5.48%)</title><rect x="1076.8" y="485" width="64.7" height="15.0" fill="rgb(231,191,17)" rx="2" ry="2" />
+<text  x="1079.85" y="495.5" >MultiTh..</text>
+</g>
+<g >
+<title>std::thread::join()() (3 samples, 2.05%)</title><rect x="26.2" y="389" width="24.2" height="15.0" fill="rgb(231,64,53)" rx="2" ry="2" />
+<text  x="29.16" y="399.5" >s..</text>
+</g>
+<g >
+<title>NetworkGenerator::generatePageFromNum (1 samples, 0.68%)</title><rect x="1173.8" y="485" width="8.1" height="15.0" fill="rgb(208,107,15)" rx="2" ry="2" />
+<text  x="1176.84" y="495.5" ></text>
+</g>
+<g >
+<title>__GI___pthread_mutex_lock(mutex=0x56159be37448) (1 samples, 0.68%)</title><rect x="761.6" y="117" width="8.1" height="15.0" fill="rgb(253,135,44)" rx="2" ry="2" />
+<text  x="764.64" y="127.5" ></text>
+</g>
+<g >
+<title>std::future&lt;std::pair&lt;double, (8 samples, 5.48%)</title><rect x="1076.8" y="469" width="64.7" height="15.0" fill="rgb(244,97,41)" rx="2" ry="2" />
+<text  x="1079.85" y="479.5" >std::fu..</text>
+</g>
+<g >
+<title>pageRankComputationWithNumNodes (1 samples, 0.68%)</title><rect x="1181.9" y="517" width="8.1" height="15.0" fill="rgb(209,136,32)" rx="2" ry="2" />
+<text  x="1184.92" y="527.5" ></text>
+</g>
+<g >
+<title>std::mutex::lock (4 samples, 2.74%)</title><rect x="195.9" y="149" width="32.3" height="15.0" fill="rgb(232,135,40)" rx="2" ry="2" />
+<text  x="198.89" y="159.5" >st..</text>
+</g>
+<g >
+<title>__pthread_clockjoin_ex (3 samples, 2.05%)</title><rect x="26.2" y="373" width="24.2" height="15.0" fill="rgb(254,4,16)" rx="2" ry="2" />
+<text  x="29.16" y="383.5" >_..</text>
+</g>
+<g >
+<title>std::lock_guard&lt;std::mutex&gt;::lock_guard (2 samples, 1.37%)</title><rect x="858.6" y="165" width="16.2" height="15.0" fill="rgb(227,31,47)" rx="2" ry="2" />
+<text  x="861.63" y="175.5" ></text>
+</g>
+<g >
+<title>__GI___pthread_mutex_lock(mutex=0x56159be37448) (1 samples, 0.68%)</title><rect x="866.7" y="117" width="8.1" height="15.0" fill="rgb(231,28,18)" rx="2" ry="2" />
+<text  x="869.71" y="127.5" ></text>
+</g>
+<g >
+<title>PageIdHash::operator() (1 samples, 0.68%)</title><rect x="381.8" y="133" width="8.1" height="15.0" fill="rgb(207,63,39)" rx="2" ry="2" />
+<text  x="384.78" y="143.5" ></text>
+</g>
+<g >
+<title>std::operator==&lt;char&gt;(__rhs=..., (1 samples, 0.68%)</title><rect x="1044.5" y="341" width="8.1" height="15.0" fill="rgb(253,93,50)" rx="2" ry="2" />
+<text  x="1047.52" y="351.5" ></text>
+</g>
+<g >
+<title>std::__invoke_impl&lt;void, (110 samples, 75.34%)</title><rect x="82.7" y="421" width="889.1" height="15.0" fill="rgb(215,62,38)" rx="2" ry="2" />
+<text  x="85.74" y="431.5" >std::__invoke_impl&lt;void,</text>
+</g>
+<g >
+<title>std::__future_base::_State_baseV2::_M_do_set(std::function&lt;std::unique_ptr&lt;std::__future_base::_Result_base, (14 samples, 9.59%)</title><rect x="301.0" y="325" width="113.1" height="15.0" fill="rgb(221,100,15)" rx="2" ry="2" />
+<text  x="303.96" y="335.5" >std::__future..</text>
+</g>
+<g >
+<title>std::__future_base::_State_baseV2::_M_do_set(std::function&lt;std::unique_ptr&lt;std::__future_base::_Result_base, (14 samples, 9.59%)</title><rect x="745.5" y="325" width="113.1" height="15.0" fill="rgb(227,130,48)" rx="2" ry="2" />
+<text  x="748.48" y="335.5" >std::__future..</text>
+</g>
+<g >
+<title>__lll_lock_wait (1 samples, 0.68%)</title><rect x="309.0" y="101" width="8.1" height="15.0" fill="rgb(237,99,26)" rx="2" ry="2" />
+<text  x="312.04" y="111.5" ></text>
+</g>
+<g >
+<title>std::__invoke_impl&lt;std::pair&lt;double, (14 samples, 9.59%)</title><rect x="527.3" y="213" width="113.1" height="15.0" fill="rgb(246,6,32)" rx="2" ry="2" />
+<text  x="530.26" y="223.5" >std::__invoke..</text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::AtomicIterator&lt;std::__detail::_Node_iterator&lt;std::pair&lt;PageIdconst, (6 samples, 4.11%)</title><rect x="325.2" y="181" width="48.5" height="15.0" fill="rgb(226,210,12)" rx="2" ry="2" />
+<text  x="328.21" y="191.5" >Mult..</text>
+</g>
+<g >
+<title>std::__invoke&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 9.59%)</title><rect x="745.5" y="229" width="113.1" height="15.0" fill="rgb(213,199,31)" rx="2" ry="2" />
+<text  x="748.48" y="239.5" >std::__invoke..</text>
+</g>
+<g >
+<title>std::_Hashtable&lt;PageId, (3 samples, 2.05%)</title><rect x="1141.5" y="469" width="24.3" height="15.0" fill="rgb(229,68,46)" rx="2" ry="2" />
+<text  x="1144.51" y="479.5" >s..</text>
+</g>
+<g >
+<title>__gthread_mutex_lock(__mutex=0x56159be372f8) (1 samples, 0.68%)</title><rect x="656.6" y="133" width="8.1" height="15.0" fill="rgb(230,69,31)" rx="2" ry="2" />
+<text  x="659.58" y="143.5" ></text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::AtomicIterator&lt;std::__detail::_Node_iterator&lt;std::pair&lt;PageIdconst, (4 samples, 2.74%)</title><rect x="705.1" y="181" width="32.3" height="15.0" fill="rgb(230,100,21)" rx="2" ry="2" />
+<text  x="708.07" y="191.5" >Mu..</text>
+</g>
+<g >
+<title>std::__future_base::_State_baseV2::wait(this=0x56159be37b10) (3 samples, 2.05%)</title><rect x="50.4" y="485" width="24.3" height="15.0" fill="rgb(239,95,46)" rx="2" ry="2" />
+<text  x="53.41" y="495.5" >s..</text>
+</g>
+<g >
+<title>std::lock_guard&lt;std::mutex&gt;::~lock_guard (1 samples, 0.68%)</title><rect x="697.0" y="165" width="8.1" height="15.0" fill="rgb(231,26,6)" rx="2" ry="2" />
+<text  x="699.99" y="175.5" ></text>
+</g>
+<g >
+<title>std::mutex::lock (5 samples, 3.42%)</title><rect x="656.6" y="149" width="40.4" height="15.0" fill="rgb(211,62,43)" rx="2" ry="2" />
+<text  x="659.58" y="159.5" >std..</text>
+</g>
+<g >
+<title>__gnu_cxx::new_allocator&lt;PageIdAndRank&gt;::construct&lt;PageIdAndRank, (1 samples, 0.68%)</title><rect x="1036.4" y="421" width="8.1" height="15.0" fill="rgb(218,72,33)" rx="2" ry="2" />
+<text  x="1039.44" y="431.5" ></text>
+</g>
+<g >
+<title>std::mutex::unlock (2 samples, 1.37%)</title><rect x="228.2" y="149" width="16.2" height="15.0" fill="rgb(238,107,34)" rx="2" ry="2" />
+<text  x="231.22" y="159.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;PageIdAndRank, (1 samples, 0.68%)</title><rect x="1036.4" y="469" width="8.1" height="15.0" fill="rgb(206,113,34)" rx="2" ry="2" />
+<text  x="1039.44" y="479.5" ></text>
+</g>
+<g >
+<title>std::_Hashtable&lt;PageId, (2 samples, 1.37%)</title><rect x="373.7" y="165" width="16.2" height="15.0" fill="rgb(212,206,13)" rx="2" ry="2" />
+<text  x="376.70" y="175.5" ></text>
+</g>
+<g >
+<title>std::__detail::_Hash_code_base&lt;PageId, (1 samples, 0.68%)</title><rect x="939.5" y="133" width="8.0" height="15.0" fill="rgb(223,202,50)" rx="2" ry="2" />
+<text  x="942.45" y="143.5" ></text>
+</g>
+<g >
+<title>std::_Function_handler&lt;std::unique_ptr&lt;std::__future_base::_Result_base,std::__future_base::_Result_base::_Deleter&gt; (13 samples, 8.90%)</title><rect x="640.4" y="293" width="105.1" height="15.0" fill="rgb(205,195,7)" rx="2" ry="2" />
+<text  x="643.41" y="303.5" >std::_Functi..</text>
+</g>
+<g >
+<title>std::mutex::unlock (1 samples, 0.68%)</title><rect x="697.0" y="149" width="8.1" height="15.0" fill="rgb(211,87,13)" rx="2" ry="2" />
+<text  x="699.99" y="159.5" ></text>
+</g>
+<g >
+<title>std::__invoke&lt;MultiThreadedPageRankComputer::updateRanks(MultiThreadedPageRankComputer::Pool&amp;, (14 samples, 9.59%)</title><rect x="82.7" y="229" width="113.2" height="15.0" fill="rgb(227,124,15)" rx="2" ry="2" />
+<text  x="85.74" y="239.5" >std::__invoke..</text>
+</g>
+<g >
+<title>std::_Hashtable&lt;PageId,std::pair&lt;PageId (2 samples, 1.37%)</title><rect x="1060.7" y="437" width="16.1" height="15.0" fill="rgb(230,16,16)" rx="2" ry="2" />
+<text  x="1063.68" y="447.5" ></text>
+</g>
+<g >
+<title>__GI___libc_malloc(bytes=71) (1 samples, 0.68%)</title><rect x="18.1" y="405" width="8.1" height="15.0" fill="rgb(227,58,52)" rx="2" ry="2" />
+<text  x="21.08" y="415.5" ></text>
+</g>
+<g >
+<title>std::_Hashtable&lt;PageId, (2 samples, 1.37%)</title><rect x="1044.5" y="421" width="16.2" height="15.0" fill="rgb(235,93,43)" rx="2" ry="2" />
+<text  x="1047.52" y="431.5" ></text>
+</g>
+<g >
+<title>std::_Function_handler&lt;std::unique_ptr&lt;std::__future_base::_Result_base,std::__future_base::_Result_base::_Deleter&gt; (13 samples, 8.90%)</title><rect x="195.9" y="293" width="105.1" height="15.0" fill="rgb(237,229,52)" rx="2" ry="2" />
+<text  x="198.89" y="303.5" >std::_Functi..</text>
+</g>
+<g >
+<title>__GI___pthread_mutex_unlock (1 samples, 0.68%)</title><rect x="115.1" y="117" width="8.1" height="15.0" fill="rgb(237,83,46)" rx="2" ry="2" />
+<text  x="118.07" y="127.5" ></text>
+</g>
+<g >
+<title>??() (1 samples, 0.68%)</title><rect x="10.0" y="533" width="8.1" height="15.0" fill="rgb(249,110,39)" rx="2" ry="2" />
+<text  x="13.00" y="543.5" ></text>
+</g>
+<g >
+<title>__lll_lock_wait (1 samples, 0.68%)</title><rect x="672.7" y="101" width="8.1" height="15.0" fill="rgb(225,144,45)" rx="2" ry="2" />
+<text  x="675.74" y="111.5" ></text>
+</g>
+<g >
+<title>std::__future_base::_State_baseV2::_M_do_set(std::function&lt;std::unique_ptr&lt;std::__future_base::_Result_base, (14 samples, 9.59%)</title><rect x="414.1" y="325" width="113.2" height="15.0" fill="rgb(220,130,22)" rx="2" ry="2" />
+<text  x="417.11" y="335.5" >std::__future..</text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::AtomicIterator&lt;std::__detail::_Node_iterator&lt;std::pair&lt;PageId (4 samples, 2.74%)</title><rect x="745.5" y="181" width="32.3" height="15.0" fill="rgb(223,196,19)" rx="2" ry="2" />
+<text  x="748.48" y="191.5" >Mu..</text>
+</g>
+<g >
+<title>__GI___pthread_mutex_unlock (1 samples, 0.68%)</title><rect x="769.7" y="117" width="8.1" height="15.0" fill="rgb(222,179,1)" rx="2" ry="2" />
+<text  x="772.73" y="127.5" ></text>
+</g>
+<g >
+<title>_int_malloc(av=av@entry=0x7fdd1220bb80 (1 samples, 0.68%)</title><rect x="18.1" y="389" width="8.1" height="15.0" fill="rgb(216,55,14)" rx="2" ry="2" />
+<text  x="21.08" y="399.5" ></text>
+</g>
+<g >
+<title>__vfprintf_internal(s=s@entry=0x7ffe9048f1f0, (1 samples, 0.68%)</title><rect x="1173.8" y="405" width="8.1" height="15.0" fill="rgb(239,55,0)" rx="2" ry="2" />
+<text  x="1176.84" y="415.5" ></text>
+</g>
+<g >
+<title>__gthread_once(__func=&lt;optimized (4 samples, 2.74%)</title><rect x="1109.2" y="373" width="32.3" height="15.0" fill="rgb(220,91,42)" rx="2" ry="2" />
+<text  x="1112.18" y="383.5" >__..</text>
+</g>
+<g >
+<title>MultiThreadedPageRankComputer::AtomicIterator&lt;std::__detail::_Node_iterator&lt;std::pair&lt;PageId (3 samples, 2.05%)</title><rect x="414.1" y="181" width="24.3" height="15.0" fill="rgb(246,142,15)" rx="2" ry="2" />
+<text  x="417.11" y="191.5" >M..</text>
+</g>
+<g >
+<title>std::__detail::_Node_iterator_base&lt;std::pair&lt;PageIdconst, (1 samples, 0.68%)</title><rect x="648.5" y="149" width="8.1" height="15.0" fill="rgb(236,21,50)" rx="2" ry="2" />
+<text  x="651.49" y="159.5" ></text>
+</g>
+<g >
+<title>__pthread_mutex_unlock_usercnt(decr=1, (1 samples, 0.68%)</title><rect x="115.1" y="101" width="8.1" height="15.0" fill="rgb(208,40,50)" rx="2" ry="2" />
+<text  x="118.07" y="111.5" ></text>
+</g>
+<g >
+<title>std::_Function_handler&lt;std::unique_ptr&lt;std::__future_base::_Result_base,std::__future_base::_Result_base::_Deleter&gt; (14 samples, 9.59%)</title><rect x="527.3" y="293" width="113.1" height="15.0" fill="rgb(210,146,47)" rx="2" ry="2" />
+<text  x="530.26" y="303.5" >std::_Functio..</text>
+</g>
+<g >
+<title>__gthread_mutex_lock(__mutex=0x56159be373a0) (1 samples, 0.68%)</title><rect x="745.5" y="133" width="8.1" height="15.0" fill="rgb(241,20,41)" rx="2" ry="2" />
+<text  x="748.48" y="143.5" ></text>
+</g>
+<g >
+<title>std::__future_base::_Async_state_commonV2::_M_join (4 samples, 2.74%)</title><rect x="1076.8" y="405" width="32.4" height="15.0" fill="rgb(213,152,14)" rx="2" ry="2" />
+<text  x="1079.85" y="415.5" >st..</text>
+</g>
+<g >
+<title>PageId::PageId (1 samples, 0.68%)</title><rect x="1036.4" y="389" width="8.1" height="15.0" fill="rgb(214,57,17)" rx="2" ry="2" />
+<text  x="1039.44" y="399.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, (1 samples, 0.68%)</title><rect x="1028.4" y="405" width="8.0" height="15.0" fill="rgb(229,150,14)" rx="2" ry="2" />
+<text  x="1031.36" y="415.5" ></text>
+</g>
+<g >
+<title>__pthread_mutex_unlock_usercnt (1 samples, 0.68%)</title><rect x="575.8" y="101" width="8.0" height="15.0" fill="rgb(229,81,4)" rx="2" ry="2" />
+<text  x="578.75" y="111.5" ></text>
+</g>
+</g>
+</svg>

@@ -113,14 +113,6 @@ private:
             links.reserve(numLinks);
         }
 
-        PageInfo(PageInfo && other)
-        : ranks {other.ranks[0], other.ranks[1]}
-        , numLinks(other.numLinks)
-        , isDangling(other.isDangling)
-        , links(std::move(other.links))
-        , mutex()
-        {}
-
         PageInfo &operator=(PageInfo &&other) {
             ranks[0] = other.ranks[0];
             ranks[1] = other.ranks[1];

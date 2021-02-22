@@ -29,17 +29,17 @@ public:
         generatePageIds(pool, network);
 
         PageMap pageHashMap;
-        EdgeMap edges;
-
-        initEdges(pool, network, edges);
+        pageHashMap.reserve(network.getSize());
 
         size_t danglingCount = 0;
         PageRank initialRank = 1.0 / network.getSize();
         initPages(network, pageHashMap, initialRank, danglingCount);
         double dangleSum = initialRank * danglingCount;
 
+        initEdges(pool, network, pageHashMap);
+
         for (uint32_t iteration = 0; iteration < iterations; ++iteration) {
-            auto changes = updateRanks(pool, pageHashMap, edges,
+            auto changes = updateRanks(pool, pageHashMap,
                 network.getSize(), dangleSum, alpha, iteration);
 
             auto difference = changes.first;
@@ -107,7 +107,28 @@ private:
             : ranks { initialRank, initialRank }
             , numLinks(numLinks)
             , isDangling(isDangling)
+            , links()
+            , mutex()
         {
+            links.reserve(numLinks);
+        }
+
+        PageInfo(PageInfo && other)
+        : ranks {other.ranks[0], other.ranks[1]}
+        , numLinks(other.numLinks)
+        , isDangling(other.isDangling)
+        , links(std::move(other.links))
+        , mutex()
+        {}
+
+        PageInfo &operator=(PageInfo &&other) {
+            ranks[0] = other.ranks[0];
+            ranks[1] = other.ranks[1];
+            numLinks = other.numLinks;
+            isDangling = other.isDangling;
+            links = std::move(other.links);
+
+            return *this;
         }
 
         PageRank setCurrentRank(uint32_t iteration, PageRank newRank)
@@ -127,9 +148,7 @@ private:
         PageRank ranks[2]; // current and prev ranks, depending on iteration parity
         size_t numLinks;
         bool isDangling;
-    };
 
-    struct EdgeInfo {
         std::vector<PageId> links;
         std::mutex mutex;
 
@@ -170,7 +189,6 @@ private:
     };
 
     using PageMap = std::unordered_map<PageId, PageInfo, PageIdHash>;
-    using EdgeMap = std::unordered_map<PageId, EdgeInfo, PageIdHash>;
 
     static void generatePageIds(Pool& pool, Network const& network)
     {
@@ -205,18 +223,12 @@ private:
         }
     }
 
-    static void initEdges(Pool& pool, Network const& network, EdgeMap& edges)
+    static void initEdges(Pool& pool, Network const& network, PageMap & pageHashMap)
     {
-
-        for (auto const& page : network.getPages()) {
-            for (auto const& link : page.getLinks()) {
-                edges[link];
-            }
-        }
 
         std::atomic<size_t> pageIndex(0);
 
-        auto func = [&network, &edges, &pageIndex]([[maybe_unused]] uint32_t threadId) {
+        auto func = [&network, &pageHashMap, &pageIndex]([[maybe_unused]] uint32_t threadId) {
             auto const& pages = network.getPages();
 
             size_t fetchedPageIndex;
@@ -224,7 +236,7 @@ private:
                 auto const& page = pages[fetchedPageIndex];
 
                 for (auto const& link : page.getLinks()) {
-                    edges[link].push_back(page.getId());
+                    pageHashMap[link].push_back(page.getId());
                 }
             }
         };
@@ -234,7 +246,7 @@ private:
     }
 
     static std::pair<double, double>
-    updateRanks(Pool& pool, PageMap& pageHashMap, EdgeMap& edges,
+    updateRanks(Pool& pool, PageMap& pageHashMap,
         const size_t networkSize, const double dangleSum, const double alpha, const uint32_t iteration)
     {
 
@@ -249,8 +261,7 @@ private:
             threadsIters.push_back(std::move(iter));
         }
 
-        auto func = [&pageHashMap, &edges,
-                        networkSize, dangleSum, alpha, iteration,
+        auto func = [&pageHashMap, networkSize, dangleSum, alpha, iteration,
                         &threadsIters, numThreads](uint32_t threadId) {
             double dangleSumChange = 0;
             double pageRankCumulativeChange = 0;
@@ -264,13 +275,12 @@ private:
                 MapIter fetchedIter;
                 while ((fetchedIter = threadsIters[threadJobId].fetch_advance(numThreads)) != pageHashMap.end()) {
                     auto& pageMapElem = *fetchedIter;
-                    PageId const& pageId = pageMapElem.first;
                     PageInfo& pageInfo = pageMapElem.second;
 
                     PageRank newRank = (dangleSum * alpha + (1.0 - alpha)) / networkSize;
 
-                    if (edges.count(pageId) > 0) {
-                        for (auto const& link : edges[pageId].links) {
+                    if (pageInfo.links.size() > 0) {
+                        for (auto const& link : pageInfo.links) {
                             newRank += alpha * pageHashMap[link].getLinkValue(iteration);
                         }
                     }
@@ -301,7 +311,7 @@ private:
     {
         std::vector<PageIdAndRank> result;
 
-        for (auto iter : pageHashMap) {
+        for (auto &iter : pageHashMap) {
             result.push_back(PageIdAndRank(iter.first, iter.second.getCurrentRank(iteration)));
         }
 

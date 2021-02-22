@@ -20,17 +20,17 @@ public:
         generatePageIds(network);
 
         PageMap pageHashMap;
-        EdgeMap edges;
-
-        initEdges(network, edges);
+        pageHashMap.reserve(network.getSize());
 
         size_t danglingCount = 0;
         const PageRank initialRank = 1.0 / network.getSize();
         initPages(network, pageHashMap, initialRank, danglingCount);
         double dangleSum = initialRank * danglingCount;
 
+        initEdges(network, pageHashMap);
+
         for (uint32_t iteration = 0; iteration < iterations; ++iteration) {
-            auto changes = updateRanks(pageHashMap, edges,
+            auto changes = updateRanks(pageHashMap,
                 network.getSize(), dangleSum, alpha, iteration);
 
             auto difference = changes.first;
@@ -57,8 +57,8 @@ private:
             : ranks { initialRank, initialRank }
             , numLinks(numLinks)
             , isDangling(isDangling)
-        {
-        }
+            , links()
+        {}
 
         PageRank setCurrentRank(uint32_t iteration, PageRank newRank) noexcept
         {
@@ -77,10 +77,15 @@ private:
         PageRank ranks[2];
         size_t numLinks;
         bool isDangling;
+        std::vector<PageId> links;
+
+        void push_back(PageId const& elem)
+        {
+            links.push_back(elem);
+        }
     };
 
     using PageMap = std::unordered_map<PageId, PageInfo, PageIdHash>;
-    using EdgeMap = std::unordered_map<PageId, std::vector<PageId>, PageIdHash>;
 
     static void generatePageIds(Network const& network)
     {
@@ -102,17 +107,17 @@ private:
         }
     }
 
-    static void initEdges(Network const& network, EdgeMap& edges)
+    static void initEdges(Network const& network, PageMap & pageHashMap)
     {
         for (auto const& page : network.getPages()) {
             for (auto const& link : page.getLinks()) {
-                edges[link].push_back(page.getId());
+                pageHashMap[link].push_back(page.getId());
             }
         }
     }
 
     static std::pair<double, double>
-    updateRanks(PageMap& pageHashMap, EdgeMap& edges,
+    updateRanks(PageMap& pageHashMap,
         size_t networkSize, const double dangleSum, const double alpha, const uint32_t iteration)
     {
 
@@ -120,14 +125,13 @@ private:
         double pageRankCumulativeChange = 0;
 
         for (auto& pageMapElem : pageHashMap) {
-            PageId const& pageId = pageMapElem.first;
             PageInfo& pageInfo = pageMapElem.second;
 
             double danglingWeight = 1.0 / networkSize;
             PageRank newRank = dangleSum * alpha * danglingWeight + (1.0 - alpha) / networkSize;
 
-            if (edges.count(pageId) > 0) {
-                for (auto const& link : edges[pageId]) {
+            if (pageInfo.links.size() > 0) {
+                for (auto const& link : pageInfo.links) {
                     newRank += alpha * pageHashMap[link].getLinkValue(iteration);
                 }
             }

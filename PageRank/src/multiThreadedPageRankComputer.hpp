@@ -109,11 +109,10 @@ private:
             , isDangling(isDangling)
             , links()
             , mutex()
-        {
-            links.reserve(numLinks);
-        }
+        {}
 
-        PageInfo &operator=(PageInfo &&other) {
+        PageInfo& operator=(PageInfo&& other)
+        {
             ranks[0] = other.ranks[0];
             ranks[1] = other.ranks[1];
             numLinks = other.numLinks;
@@ -144,7 +143,7 @@ private:
         std::vector<PageId> links;
         std::mutex mutex;
 
-        void push_back(PageId elem)
+        void push_back(PageId const& elem)
         {
             std::lock_guard<std::mutex> lck(mutex);
             links.push_back(elem);
@@ -215,7 +214,7 @@ private:
         }
     }
 
-    static void initEdges(Pool& pool, Network const& network, PageMap & pageHashMap)
+    static void initEdges(Pool& pool, Network const& network, PageMap& pageHashMap)
     {
 
         std::atomic<size_t> pageIndex(0);
@@ -303,7 +302,7 @@ private:
     {
         std::vector<PageIdAndRank> result;
 
-        for (auto &iter : pageHashMap) {
+        for (auto& iter : pageHashMap) {
             result.push_back(PageIdAndRank(iter.first, iter.second.getCurrentRank(iteration)));
         }
 
